@@ -164,7 +164,7 @@
       <div class="card">
         <span class="emoji">📐</span>
         <h3>Position-aware parsing</h3>
-        <p>Rows are matched by their Vision bounding box, not by OCR output order, so the slots never swap.</p>
+        <p>Rows are matched to a learned screen position, so a row Vision misses can&rsquo;t shift the other two into the wrong slots.</p>
       </div>
       <div class="card">
         <span class="emoji">🗓️</span>
@@ -194,8 +194,11 @@ swift watcher/RobloxEventWatcher.swift</pre>
 
     <p class="sub">First run on a new resolution? Start it with debug output and check that all
       three rows land inside the crop:</p>
-<pre>WATCHER_DEBUG=1 swift watcher/RobloxEventWatcher.swift
+<pre>WATCHER_DEBUG=1 WATCHER_TEST=1 swift watcher/RobloxEventWatcher.swift
 open /tmp/roblox-debug.png</pre>
+
+    <p class="sub"><code>WATCHER_TEST=1</code> posts one message to the webhook at startup, so you
+      know the Discord side works before waiting on an event.</p>
 
     <div class="note">
       <p><strong>Rotate your webhook.</strong> The webhook URL that was hard-coded in the earlier
@@ -218,9 +221,10 @@ open /tmp/roblox-debug.png</pre>
       <li><strong>Recognise.</strong> <code>VNRecognizeTextRequest</code> runs at
         <code>.accurate</code> with language correction off &mdash; it must not "helpfully" turn
         <code>RAINBOW</code> into a dictionary word. Each line keeps its vertical position.</li>
-      <li><strong>Assign and decide.</strong> Lines are sorted top-to-bottom, the event name is
-        fuzzy-matched, and the three timers map onto the rotating / Junkyard / Blitz slots in that
-        order. Each slot runs its own countdown independently.</li>
+      <li><strong>Assign and decide.</strong> Lines are sorted top-to-bottom and the three timers map
+        onto the rotating / Junkyard / Blitz slots. Once all three have been seen, their vertical
+        positions are remembered, so a later reading that misses one still assigns the rest
+        correctly. Each slot runs its own countdown independently.</li>
     </ol>
 
     <h3 style="margin-top:26px">Reading two timer formats</h3>
@@ -254,7 +258,9 @@ open /tmp/roblox-debug.png</pre>
     <table>
       <tr><th>Setting</th><th>Default</th><th>Meaning</th></tr>
       <tr><td><code>alertEvents</code></td><td>SECRET, OG, MYTHIC, LEGENDARY, RAINBOW</td><td>Which top-slot events actually ping</td></tr>
-      <tr><td><code>alertLeadSeconds</code></td><td><code>120</code></td><td>How early the ping goes out</td></tr>
+      <tr><td><code>alertLeadSeconds</code></td><td><code>300</code></td><td>How early the ping goes out</td></tr>
+      <tr><td><code>endgameSeconds</code></td><td><code>60</code></td><td>Below this, checks and edits go to once a second</td></tr>
+      <tr><td><code>alertUnknownRotating</code></td><td><code>true</code></td><td>Ping even when the label can&rsquo;t be read</td></tr>
       <tr><td><code>alertJunkyard</code> / <code>alertBlitz</code></td><td><code>false</code></td><td>Ping for the two lower slots too</td></tr>
       <tr><td><code>knownEvents</code></td><td>9 names</td><td>Every label the OCR should recognise</td></tr>
       <tr><td><code>idleCheckInterval</code></td><td><code>25</code></td><td>Seconds between checks when nothing is close</td></tr>
@@ -264,6 +270,7 @@ open /tmp/roblox-debug.png</pre>
       <tr><td><code>cropYFraction</code> / <code>cropHeightFraction</code></td><td><code>0.62</code> / <code>0.38</code></td><td>Vertical crop, as a fraction of window height</td></tr>
       <tr><td><code>DISCORD_WEBHOOK_URL</code></td><td>&mdash; (required)</td><td>Webhook, read from the environment</td></tr>
       <tr><td><code>WATCHER_DEBUG</code></td><td>unset</td><td><code>1</code> prints OCR lines and saves the crop</td></tr>
+      <tr><td><code>WATCHER_TEST</code></td><td>unset</td><td><code>1</code> sends one test message at startup</td></tr>
     </table>
 
     <p class="sub" style="margin-top:20px">Every top-slot event pings if you add it to

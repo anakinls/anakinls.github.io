@@ -15,9 +15,13 @@ let activeCheckInterval: UInt64 = 5
 let urgentCheckInterval: UInt64 = 1
 
 // Erst ab hier wird gepingt und der Countdown live mitgeschrieben.
-// Die HUD-Timer laufen bis zu einer Stunde - ohne Vorlauf-Grenze
-// würden wir eine Stunde lang jede Sekunde editieren.
-let alertLeadSeconds = 120
+// Der obere Slot wechselt alle 5 Minuten, also deckt ein Vorlauf von
+// 5 Minuten praktisch den ganzen Zyklus ab.
+let alertLeadSeconds = 300
+
+// Unter dieser Restzeit wird sekündlich geprüft und editiert,
+// darüber reicht ein ruhigerer Takt.
+let endgameSeconds = 60
 
 // Oberer Slot: "garantierte" Events.
 // ROADWAY  -> jede volle Stunde (:00)
@@ -50,6 +54,12 @@ let alertEvents: Set<String> = [
 let alertJunkyard = false
 let alertBlitz = false
 
+// Wenn Vision den Namen im oberen Slot nicht lesen kann: trotzdem
+// pingen. Zwischen Roadway (:00) und Dragrace (:30) laufen dort nur
+// die Rarity-Events, und die meisten davon stehen ohnehin oben.
+// Lieber ein Ping zu viel als ein verpasstes SECRET.
+let alertUnknownRotating = true
+
 // Crop auf das HUD unten rechts, relativ zur Fenstergröße.
 // Mit WATCHER_DEBUG=1 wird der Ausschnitt als PNG abgelegt,
 // damit sich das auf einer anderen Auflösung nachziehen lässt.
@@ -72,6 +82,11 @@ application.setActivationPolicy(.accessory)
 let debugEnabled =
     ProcessInfo.processInfo
         .environment["WATCHER_DEBUG"] == "1"
+
+// Beim Start einmal an Discord schicken, um den Webhook zu prüfen.
+let testEnabled =
+    ProcessInfo.processInfo
+        .environment["WATCHER_TEST"] == "1"
 
 // ============================================================
 // DISCORD CONFIG
@@ -161,6 +176,14 @@ final class WatcherState {
     var lastSeconds: [Slot: Int] = [:]
     var lastRotatingEvent: String?
     var currentInterval: UInt64 = idleCheckInterval
+
+    // Gelernte Zeilenpositionen im Crop. Sobald alle drei Zeilen
+    // einmal gelesen wurden, lassen sich später auch unvollständige
+    // Lesungen korrekt zuordnen.
+    var slotY: [Slot: CGFloat] = [:]
+
+    // Damit die Zeitplan-Meldung nicht bei jedem Check erscheint.
+    var lastScheduleNote: String?
 
     // Nach einem 429 vor diesem Zeitpunkt nichts mehr an Discord schicken.
     var discordBlockedUntil: Date?
@@ -1041,8 +1064,48 @@ func parseHUD(lines: [OCRLine]) -> HUDReading {
 
     let slotOrder: [Slot] = [.rotating, .junkyard, .blitz]
 
-    for (index, timer) in ordered.prefix(slotOrder.count).enumerated() {
-        reading.seconds[slotOrder[index]] = timer.seconds
+    if ordered.count >= slotOrder.count {
+
+        // Alle Zeilen da: direkt zuordnen und die Positionen merken.
+        for (index, timer) in ordered.prefix(slotOrder.count).enumerated() {
+            reading.seconds[slotOrder[index]] = timer.seconds
+            state.slotY[slotOrder[index]] = timer.midY
+        }
+
+    } else if !state.slotY.isEmpty {
+
+        // Eine Zeile fehlt. Nach Reihenfolge zuzuordnen würde die
+        // restlichen nach oben rutschen lassen - also über die
+        // gelernten Positionen gehen.
+        for timer in ordered {
+
+            var best: (slot: Slot, distance: CGFloat)?
+
+            for slot in slotOrder {
+
+                guard let knownY = state.slotY[slot] else {
+                    continue
+                }
+
+                let distance = abs(knownY - timer.midY)
+
+                if best == nil || distance < best!.distance {
+                    best = (slot, distance)
+                }
+            }
+
+            // Zu weit weg heißt: das ist keine der bekannten Zeilen.
+            if let best, best.distance < 0.08 {
+                reading.seconds[best.slot] = timer.seconds
+            }
+        }
+
+    } else {
+
+        // Noch nichts gelernt - bestmöglich nach Reihenfolge.
+        for (index, timer) in ordered.enumerated() {
+            reading.seconds[slotOrder[index]] = timer.seconds
+        }
     }
 
     return reading
@@ -1085,7 +1148,7 @@ func shouldAlert(slot: Slot, event: String?) -> Bool {
 
     case .rotating:
         guard let event else {
-            return false
+            return alertUnknownRotating
         }
 
         return alertEvents.contains(event)
@@ -1103,7 +1166,7 @@ func title(for slot: Slot, event: String?) -> String {
     switch slot {
 
     case .rotating:
-        return event ?? "EVENT"
+        return event ?? "EVENT (Name nicht lesbar)"
 
     case .junkyard:
         return "JUNKYARD"
@@ -1169,6 +1232,10 @@ func handleSlot(
         }
 
         state.active[slot] = nil
+
+        if slot == .rotating {
+            state.lastScheduleNote = nil
+        }
     }
 
     state.lastSeconds[slot] = seconds
@@ -1208,7 +1275,12 @@ func handleSlot(
         }
 
         // Discord erlaubt nicht beliebig viele Edits pro Sekunde.
-        guard Date().timeIntervalSince(countdown.lastEditAt) >= 1.0
+        // Weit vorher reicht ein Update alle 10s, erst in der
+        // Schlussphase wird sekündlich geschrieben.
+        let minimumGap: TimeInterval =
+            seconds > endgameSeconds ? 10 : 1
+
+        guard Date().timeIntervalSince(countdown.lastEditAt) >= minimumGap
         else {
             return
         }
@@ -1247,7 +1319,9 @@ func handleSlot(
     if slot == .rotating, resolvedEvent == nil {
         resolvedEvent = scheduledEvent(inSeconds: seconds)
 
-        if let resolvedEvent {
+        if let resolvedEvent, state.lastScheduleNote != resolvedEvent {
+            state.lastScheduleNote = resolvedEvent
+
             print("🗓️ Name aus Zeitplan abgeleitet: \(resolvedEvent)")
         }
     }
@@ -1371,6 +1445,16 @@ func performCheck() async -> HUDReading {
 func nextInterval(for reading: HUDReading) -> UInt64 {
 
     if !state.active.isEmpty {
+
+        // Läuft ein Countdown, hängt der Takt an dessen Restzeit.
+        let remaining = state.active.keys
+            .compactMap { reading.seconds[$0] }
+            .min()
+
+        if let remaining, remaining > endgameSeconds {
+            return activeCheckInterval
+        }
+
         return urgentCheckInterval
     }
 
@@ -1400,7 +1484,7 @@ func nextInterval(for reading: HUDReading) -> UInt64 {
         return idleCheckInterval
     }
 
-    if soonest <= alertLeadSeconds {
+    if soonest <= endgameSeconds {
         return urgentCheckInterval
     }
 
@@ -1427,6 +1511,7 @@ print("  ⚡ Blitz")
 print("")
 print("Ping bei: \(alertEvents.sorted().joined(separator: ", "))")
 print("Vorlauf: \(alertLeadSeconds)s")
+print("Unbekannter Name: \(alertUnknownRotating ? "pingt trotzdem" : "kein Ping")")
 print("Junkyard-Ping: \(alertJunkyard ? "an" : "aus")")
 print("Blitz-Ping: \(alertBlitz ? "an" : "aus")")
 print("")
@@ -1446,6 +1531,23 @@ Task {
 
     print("🚀 Watcher gestartet.")
     print("")
+
+    if testEnabled {
+
+        print("🧪 Teste Discord-Webhook...")
+
+        if let messageID = await sendDiscordMessage(
+            content:
+                "🧪 **Roblox Event Watcher** ist verbunden. "
+                + "Das ist eine Testnachricht."
+        ) {
+            print("✅ Webhook funktioniert (Message \(messageID)).")
+        } else {
+            print("❌ Webhook-Test fehlgeschlagen - siehe Fehler oben.")
+        }
+
+        print("")
+    }
 
     while !Task.isCancelled {
 
