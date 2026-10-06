@@ -9,17 +9,23 @@ import Dispatch
 // CONFIG
 // ============================================================
 
-// Nur der obere Slot wird verfolgt. Junkyard und Blitz laufen
-// ohnehin in festem Takt, also kostet ihr Bereich im Crop nur
-// Auflösung bei dem, worauf es ankommt.
+// Verfolgt wird die Event-Zeile oben. Junkyard interessiert nicht,
+// der Weather-Trait (Blitz) ganz unten wird aber in der Nachricht
+// mit ausgegeben - er läuft in langem Takt, also reicht es, ihn
+// selten nachzulesen.
 //
 // Gemessen an einem Debug-Screenshot sitzt die Event-Zeile bei
-// x 0.90-0.99 und y 0.886-0.918 des Fensters. Etwas Rand drum
-// herum, damit es bei leicht anderer Fenstergröße noch passt.
+// y 0.886-0.918 und die Blitz-Zeile bei y 0.952-0.987 des Fensters.
+// Etwas Rand drum herum, damit es bei leicht anderer Fenstergröße
+// noch passt.
 let cropXFraction: CGFloat = 0.88
-let cropYFraction: CGFloat = 0.87
 let cropWidthFraction: CGFloat = 0.12
-let cropHeightFraction: CGFloat = 0.06
+
+let eventRowY: CGFloat = 0.87
+let eventRowHeight: CGFloat = 0.06
+
+let blitzRowY: CGFloat = 0.948
+let blitzRowHeight: CGFloat = 0.045
 
 // Die HUD-Schrift ist klein - Vision liest sie deutlich besser,
 // wenn der Ausschnitt vorher hochskaliert wird.
@@ -38,10 +44,14 @@ let syncInterval: TimeInterval = 10
 let syncIntervalNearEnd: TimeInterval = 3
 let nearEndSeconds = 20
 
-// Höchstens alle zwei Sekunden editieren. Zusammen mit dem Takt
-// oben hinkt die angezeigte Zahl nie mehr als etwa drei Sekunden
-// hinterher, und die Webhook-Rate bleibt im Rahmen.
-let editGap: TimeInterval = 2
+// Der Blitz läuft fast eine Stunde - einmal pro Minute nachlesen
+// reicht völlig, dazwischen zählt auch er lokal weiter.
+let blitzSyncInterval: TimeInterval = 60
+
+// Höchstens alle fünf Sekunden editieren. Die angezeigte Zahl
+// hinkt damit bis zu fünf Sekunden hinterher, dafür bleibt die
+// Zahl der Webhook-Edits pro Zyklus niedrig.
+let editGap: TimeInterval = 5
 
 // Weicht die OCR-Lesung um mehr als das vom lokal gezählten Wert
 // ab, gilt die Lesung.
@@ -197,7 +207,11 @@ final class WatcherState {
     var deadline: Date?
     var event: String?
 
+    // Weather-Trait, gleiche Mechanik, nur viel seltener gelesen.
+    var blitzDeadline: Date?
+
     var nextSync = Date()
+    var nextBlitzSync = Date()
 
     // Nach einem 429 vor diesem Zeitpunkt nichts mehr senden.
     var discordBlockedUntil: Date?
@@ -209,6 +223,15 @@ final class WatcherState {
         }
 
         return max(0, Int(deadline.timeIntervalSinceNow.rounded()))
+    }
+
+    var blitzRemaining: Int? {
+
+        guard let blitzDeadline else {
+            return nil
+        }
+
+        return max(0, Int(blitzDeadline.timeIntervalSinceNow.rounded()))
     }
 }
 
@@ -250,14 +273,36 @@ func formatTimer(_ totalSeconds: Int) -> String {
     )
 }
 
+// Der Blitz steht im Spiel als "42m 47s" da, nicht als Uhrzeit.
+func formatUnits(_ totalSeconds: Int) -> String {
+
+    let safe = max(0, totalSeconds)
+
+    let hours = safe / 3600
+    let minutes = (safe % 3600) / 60
+    let seconds = safe % 60
+
+    if hours > 0 {
+        return "\(hours)h \(minutes)m \(seconds)s"
+    }
+
+    if minutes > 0 {
+        return "\(minutes)m \(seconds)s"
+    }
+
+    return "\(seconds)s"
+}
+
 // Untereinander, so wie es im Spiel steht:
 //
 //   @Rolle
 //   🔴 SECRET
 //   ⏳ in 0:47
+//   ⚡ Blitz in 42m 47s
 func discordContent(
     event: String?,
     seconds: Int,
+    blitzSeconds: Int?,
     mention: Bool
 ) -> String {
 
@@ -273,6 +318,10 @@ func discordContent(
         lines.append("✅ **jetzt da!**")
     } else {
         lines.append("⏳ **in \(formatTimer(seconds))**")
+    }
+
+    if let blitzSeconds {
+        lines.append("⚡ Blitz **in \(formatUnits(blitzSeconds))**")
     }
 
     return lines.joined(separator: "\n")
@@ -579,7 +628,7 @@ func findRobloxWindow() async throws -> SCWindow? {
 // SCREENSHOT
 // ============================================================
 
-func captureEventRow(_ window: SCWindow) async throws -> CGImage {
+func captureWindow(_ window: SCWindow) async throws -> CGImage {
 
     let filter = SCContentFilter(
         desktopIndependentWindow: window
@@ -594,19 +643,29 @@ func captureEventRow(_ window: SCWindow) async throws -> CGImage {
     configuration.showsCursor = false
     configuration.pixelFormat = kCVPixelFormatType_32BGRA
 
-    let fullImage = try await SCScreenshotManager.captureImage(
+    return try await SCScreenshotManager.captureImage(
         contentFilter: filter,
         configuration: configuration
     )
+}
+
+// Eine Zeile aus dem Vollbild schneiden und für OCR vergrößern.
+// Beide Zeilen kommen aus demselben Screenshot - ein Capture pro
+// Durchlauf reicht.
+func cropRow(
+    _ fullImage: CGImage,
+    yFraction: CGFloat,
+    heightFraction: CGFloat
+) throws -> CGImage {
 
     let width = CGFloat(fullImage.width)
     let height = CGFloat(fullImage.height)
 
     let cropRect = CGRect(
         x: width * cropXFraction,
-        y: height * cropYFraction,
+        y: height * yFraction,
         width: width * cropWidthFraction,
-        height: height * cropHeightFraction
+        height: height * heightFraction
     ).integral
 
     guard let croppedImage = fullImage.cropping(to: cropRect)
@@ -616,7 +675,7 @@ func captureEventRow(_ window: SCWindow) async throws -> CGImage {
             code: 1,
             userInfo: [
                 NSLocalizedDescriptionKey:
-                    "Event-Zeile konnte nicht zugeschnitten werden."
+                    "Zeile konnte nicht zugeschnitten werden."
             ]
         )
     }
@@ -900,6 +959,84 @@ func parseClockTimer(from line: String) -> Int? {
     return minutes * 60 + seconds
 }
 
+// Der Blitz steht als "42m 47s" da - hier ist genau das gewollt,
+// was in der Event-Zeile ausgeschlossen wird.
+func parseUnitsTimer(from line: String) -> Int? {
+
+    let cleaned = line
+        .uppercased()
+        .replacingOccurrences(of: "O", with: "0")
+        .replacingOccurrences(of: "I", with: "1")
+        .replacingOccurrences(of: "L", with: "1")
+
+    let pattern = #"(\d{1,2})\s*([HMS])"#
+
+    guard
+        let regex = try? NSRegularExpression(pattern: pattern)
+    else {
+        return nil
+    }
+
+    let range = NSRange(
+        cleaned.startIndex..<cleaned.endIndex,
+        in: cleaned
+    )
+
+    let matches = regex.matches(in: cleaned, range: range)
+
+    guard !matches.isEmpty else {
+        return nil
+    }
+
+    var total = 0
+    var found = false
+
+    for match in matches {
+
+        guard
+            let valueRange = Range(match.range(at: 1), in: cleaned),
+            let unitRange = Range(match.range(at: 2), in: cleaned),
+            let value = Int(cleaned[valueRange])
+        else {
+            continue
+        }
+
+        switch cleaned[unitRange] {
+        case "H": total += value * 3600
+        case "M": total += value * 60
+        default:  total += value
+        }
+
+        found = true
+    }
+
+    return found ? total : nil
+}
+
+// ============================================================
+// ZEITPLAN
+// ============================================================
+
+// ROADWAY startet um :55, DRAGRACE um :25 - jeweils fünf Minuten
+// vor der vollen bzw. halben Stunde. Wenn OCR den Namen nicht
+// liest, lässt sich das aus der Uhrzeit ableiten, auf die der
+// Countdown zeigt. Die Rarity-Events auf den übrigen
+// 5-Minuten-Marken rotieren in unbekannter Reihenfolge und
+// bleiben deshalb offen.
+func scheduledEvent(inSeconds seconds: Int) -> String? {
+
+    let target = Date().addingTimeInterval(TimeInterval(seconds))
+
+    let minute = Calendar.current.component(.minute, from: target)
+
+    // Eine Minute Toleranz, der Countdown ist nie exakt synchron.
+    switch minute {
+    case 54, 55: return "ROADWAY"
+    case 24, 25: return "DRAGRACE"
+    default:     return nil
+    }
+}
+
 // ============================================================
 // LESUNG
 // ============================================================
@@ -948,6 +1085,7 @@ func finishLiveMessage() async {
         content: discordContent(
             event: live.event,
             seconds: 0,
+            blitzSeconds: state.blitzRemaining,
             mention: false
         )
     )
@@ -978,6 +1116,7 @@ func startNewMessage(
         content: discordContent(
             event: event,
             seconds: seconds,
+            blitzSeconds: state.blitzRemaining,
             mention: shouldPing
         )
     ) else {
@@ -1012,6 +1151,7 @@ func tickCountdown() async {
             content: discordContent(
                 event: state.event,
                 seconds: 0,
+                blitzSeconds: state.blitzRemaining,
                 mention: false
             )
         )
@@ -1037,6 +1177,7 @@ func tickCountdown() async {
         content: discordContent(
             event: state.event,
             seconds: seconds,
+            blitzSeconds: state.blitzRemaining,
             mention: false
         )
     )
@@ -1060,10 +1201,54 @@ func performSync() async {
             return
         }
 
-        let screenshot = try await captureEventRow(window)
+        let fullImage = try await captureWindow(window)
+
+        let screenshot = try cropRow(
+            fullImage,
+            yFraction: eventRowY,
+            heightFraction: eventRowHeight
+        )
 
         if debugEnabled {
             saveDebugScreenshot(screenshot)
+        }
+
+        // ----------------------------------------------------
+        // WEATHER-TRAIT
+        // ----------------------------------------------------
+        //
+        // Läuft fast eine Stunde, also selten nachlesen - aus
+        // demselben Screenshot, nur anders zugeschnitten.
+
+        if Date() >= state.nextBlitzSync {
+
+            state.nextBlitzSync =
+                Date().addingTimeInterval(blitzSyncInterval)
+
+            if let blitzImage = try? cropRow(
+                fullImage,
+                yFraction: blitzRowY,
+                heightFraction: blitzRowHeight
+            ),
+               let blitzLines = try? recognizeLines(from: blitzImage) {
+
+                if debugEnabled {
+                    print("📝 OCR (Blitz):")
+                    for line in blitzLines {
+                        print("   \(line.text)")
+                    }
+                }
+
+                for line in blitzLines {
+                    if let blitzSeconds = parseUnitsTimer(from: line.text) {
+
+                        state.blitzDeadline = Date()
+                            .addingTimeInterval(TimeInterval(blitzSeconds))
+
+                        break
+                    }
+                }
+            }
         }
 
         let lines = try recognizeLines(from: screenshot)
@@ -1104,6 +1289,16 @@ func performSync() async {
         guard let seconds = reading.seconds else {
             print("ℹ️ Keine Zeit in der Event-Zeile gelesen.")
             return
+        }
+
+        // Name unlesbar? Um :55 und :25 steht fest, was kommt.
+        if reading.event == nil {
+
+            reading.event = scheduledEvent(inSeconds: seconds)
+
+            if let derived = reading.event {
+                print("🗓️ Name aus Zeitplan abgeleitet: \(derived)")
+            }
         }
 
         let deadline = Date().addingTimeInterval(TimeInterval(seconds))

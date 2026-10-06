@@ -143,8 +143,8 @@
     <div class="grid">
       <div class="card">
         <span class="emoji">🎯⛏️⚡</span>
-        <h3>One row, read well</h3>
-        <p>Only the top event row is captured. Junkyard and Blitz run on fixed cycles, so their pixels would only cost resolution on what matters.</p>
+        <h3>One row tracked</h3>
+        <p>Only the event row drives the countdown. The Blitz row is cropped from the same screenshot once a minute, just to be reported.</p>
       </div>
       <div class="card">
         <span class="emoji">👑</span>
@@ -158,8 +158,8 @@
       </div>
       <div class="card">
         <span class="emoji">⏱️</span>
-        <h3>Live, to the second</h3>
-        <p>Each message is edited in place every two seconds, so the number on screen is never more than about three seconds stale.</p>
+        <h3>Live countdown</h3>
+        <p>Each message is edited in place every five seconds, trading a little staleness for far fewer webhook edits per cycle.</p>
       </div>
       <div class="card">
         <span class="emoji">🔔</span>
@@ -253,12 +253,16 @@ open ~/Desktop/roblox-debug.png</pre>
       genuine new event deserving its own message &mdash; a name comparison would have swallowed
       it.</p>
 
-    <h3 style="margin-top:26px">Why only the top row</h3>
-    <p class="sub">Junkyard and Blitz run on fixed cycles, so watching them buys nothing and their
-      pixels cost resolution on the one line that changes. The crop is the event row alone. If a
-      sliver of the Junkyard row leaks in, the format filter drops it: that row counts in
+    <h3 style="margin-top:26px">Two crops, one screenshot</h3>
+    <p class="sub">The event row is the only one tracked: it is what changes, and spending the
+      whole frame on it is what makes the small label legible. If a sliver of the Junkyard row
+      leaks into that crop the format filter drops it &mdash; that row counts in
       <code>51m 36s</code> while the event row always counts in <code>1:36</code>, and only
-      <code>M:SS</code> is accepted.</p>
+      <code>M:SS</code> is accepted there.</p>
+    <p class="sub">The Blitz row is still reported, so it is cut from the <em>same</em> screenshot
+      at its own coordinates and read once a minute. It runs on a long cycle, so between reads its
+      own local clock counts it down, exactly as the event does. Each line gets the format the game
+      uses for it: <code>0:47</code> for the event, <code>42m 47s</code> for Blitz.</p>
 
     <h3 style="margin-top:26px">Reading the event name</h3>
     <p class="sub">The orange label is the smallest text on screen and the hardest to read, so it
@@ -301,10 +305,12 @@ open ~/Desktop/roblox-debug.png</pre>
       <tr><td><code>syncInterval</code> / <code>syncIntervalNearEnd</code></td><td><code>10</code> / <code>3</code></td><td>Seconds between OCR re-syncs, normally and near zero</td></tr>
       <tr><td><code>tickSeconds</code></td><td><code>1</code></td><td>Main loop tick; how fast the message is refreshed</td></tr>
       <tr><td><code>resyncToleranceSeconds</code></td><td><code>2</code></td><td>Disagreement the local clock is allowed before OCR wins</td></tr>
-      <tr><td><code>editGap</code></td><td><code>2</code></td><td>Minimum seconds between edits of that message</td></tr>
+      <tr><td><code>editGap</code></td><td><code>5</code></td><td>Minimum seconds between edits; the display lags by up to this</td></tr>
       <tr><td><code>eventAliases</code></td><td>9 events</td><td>Canonical name &rarr; every spelling the HUD may show</td></tr>
       <tr><td><code>cropXFraction</code> / <code>cropWidthFraction</code></td><td><code>0.88</code> / <code>0.12</code></td><td>Horizontal crop, as a fraction of window width</td></tr>
-      <tr><td><code>cropYFraction</code> / <code>cropHeightFraction</code></td><td><code>0.87</code> / <code>0.06</code></td><td>Vertical crop &mdash; the event row only</td></tr>
+      <tr><td><code>blitzRowY</code> / <code>blitzRowHeight</code></td><td><code>0.948</code> / <code>0.045</code></td><td>The Blitz row, cropped from the same screenshot</td></tr>
+      <tr><td><code>blitzSyncInterval</code></td><td><code>60</code></td><td>Seconds between Blitz re-reads</td></tr>
+      <tr><td><code>eventRowY</code> / <code>eventRowHeight</code></td><td><code>0.87</code> / <code>0.06</code></td><td>The event row &mdash; the only row that is tracked</td></tr>
       <tr><td><code>ocrUpscale</code></td><td><code>6</code></td><td>How much the crop is enlarged before OCR</td></tr>
       <tr><td><code>DISCORD_WEBHOOK_URL</code></td><td>&mdash; (required)</td><td>Webhook, read from the environment</td></tr>
       <tr><td><code>WATCHER_DEBUG</code></td><td>unset</td><td><code>1</code> prints OCR lines and saves the crop</td></tr>
