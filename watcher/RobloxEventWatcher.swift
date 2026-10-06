@@ -75,18 +75,30 @@ let knownEvents = eventAliases.keys.sorted()
 // "GOLD" und "OG" kann nicht in einem längeren Wort zuschlagen.
 // Die feste Reihenfolge macht das Ergebnis außerdem reproduzierbar,
 // anders als beim Iterieren über ein Dictionary.
-let eventSpellings: [(canonical: String, spelling: String)] =
-    eventAliases
-        .flatMap { entry in
-            entry.value.map {
-                (canonical: entry.key, spelling: $0)
-            }
+//
+// Ausgeschrieben statt als flatMap/map-Kette: der Type-Checker
+// braucht für die Kette mit benannten Tupeln zu lange und bricht ab.
+let eventSpellings: [(canonical: String, spelling: String)] = {
+
+    var pairs: [(canonical: String, spelling: String)] = []
+
+    for (canonical, spellings) in eventAliases {
+        for spelling in spellings {
+            pairs.append((canonical: canonical, spelling: spelling))
         }
-        .sorted { lhs, rhs in
-            lhs.spelling.count == rhs.spelling.count
-                ? lhs.spelling < rhs.spelling
-                : lhs.spelling.count > rhs.spelling.count
+    }
+
+    pairs.sort { lhs, rhs in
+
+        if lhs.spelling.count != rhs.spelling.count {
+            return lhs.spelling.count > rhs.spelling.count
         }
+
+        return lhs.spelling < rhs.spelling
+    }
+
+    return pairs
+}()
 
 // Nur diese Events lösen einen Discord-Ping aus.
 // Alles eintragen = Ping alle 5 Minuten, also bewusst klein halten.
@@ -1074,7 +1086,7 @@ func parseDuration(from line: String) -> (seconds: Int, style: TimerStyle)? {
             }
 
             if found {
-                return (total, .units)
+                return (seconds: total, style: .units)
             }
         }
     }
@@ -1126,10 +1138,10 @@ func parseDuration(from line: String) -> (seconds: Int, style: TimerStyle)? {
             return nil
         }
 
-        return (hours * 3600 + middle * 60 + last, .clock)
+        return (seconds: hours * 3600 + middle * 60 + last, style: .clock)
     }
 
-    return (middle * 60 + last, .clock)
+    return (seconds: middle * 60 + last, style: .clock)
 }
 
 // ============================================================
@@ -1145,6 +1157,11 @@ func parseDuration(from line: String) -> (seconds: Int, style: TimerStyle)? {
 //
 // Die Zuordnung läuft über die y-Position aus Vision, nicht über
 // die Reihenfolge im OCR-Ergebnis.
+// Benannte Typen statt Inline-Tupel: der Type-Checker hat damit
+// deutlich weniger zu tun, und es liest sich besser.
+typealias TimerLine = (seconds: Int, style: TimerStyle, midY: CGFloat)
+typealias LabelLine = (event: String, midY: CGFloat)
+
 // Nächstgelegene gelernte Zeile zu einer y-Position.
 func learnedSlot(
     forMidY midY: CGFloat,
@@ -1178,19 +1195,25 @@ func parseHUD(lines: [OCRLine]) -> HUDReading {
 
     var reading = HUDReading()
 
-    var timers: [(seconds: Int, style: TimerStyle, midY: CGFloat)] = []
-    var labels: [(event: String, midY: CGFloat)] = []
+    var timers: [TimerLine] = []
+    var labels: [LabelLine] = []
 
     for line in lines {
 
         // Vision trennt Name und Timer meist in zwei Zeilen, fasst sie
         // aber gelegentlich zu einer zusammen - deshalb beides prüfen.
         if let event = detectEvent(in: line) {
-            labels.append((event, line.midY))
+            labels.append((event: event, midY: line.midY))
         }
 
         if let timer = parseDuration(from: line.text) {
-            timers.append((timer.seconds, timer.style, line.midY))
+            timers.append(
+                (
+                    seconds: timer.seconds,
+                    style: timer.style,
+                    midY: line.midY
+                )
+            )
         }
     }
 
@@ -1199,17 +1222,17 @@ func parseHUD(lines: [OCRLine]) -> HUDReading {
     }
 
     // Oberster Name gehört zum oberen Slot.
-    let topLabel = labels.first
+    let topLabel: LabelLine? = labels.first
 
     reading.rotatingEvent = topLabel?.event
 
     // Timer unterhalb des Namens zuerst, sonst einfach von oben.
-    var ordered = timers
+    var ordered: [TimerLine] = timers
 
     if let topLabel {
         // <= statt <, damit ein Timer auf Höhe des Namens
         // (zusammengefasste Zeile) nicht verloren geht.
-        let below = timers.filter { $0.midY <= topLabel.midY }
+        let below: [TimerLine] = timers.filter { $0.midY <= topLabel.midY }
 
         if !below.isEmpty {
             ordered = below
@@ -1226,12 +1249,12 @@ func parseHUD(lines: [OCRLine]) -> HUDReading {
     // Slot - egal, wie viele Zeilen insgesamt gelesen wurden und
     // egal, an welcher Stelle sie steht.
 
-    let clockTimers = ordered.filter { $0.style == .clock }
-    let unitTimers = ordered.filter { $0.style == .units }
+    let clockTimers: [TimerLine] = ordered.filter { $0.style == .clock }
+    let unitTimers: [TimerLine] = ordered.filter { $0.style == .units }
 
     if clockTimers.count == 1 {
 
-        let rotating = clockTimers[0]
+        let rotating: TimerLine = clockTimers[0]
 
         reading.seconds[.rotating] = rotating.seconds
         state.slotY[.rotating] = rotating.midY
