@@ -273,13 +273,12 @@ func formatUnits(_ totalSeconds: Int) -> String {
     return "\(seconds)s"
 }
 
-// Untereinander, so wie es im Spiel steht:
+// Untereinander, eine Zeile pro Sache - Symbol, Name, Zeit:
 //
 //   @Rolle
-//   🔴 SECRET
-//   ⏳ in 0:47
-//   ⛏️ Junkyard in 25m 47s
-//   ⚡ Blitz in 42m 47s
+//   🏁 DRAGRACE in 1:02
+//   ⛏️ Junkyard in 46m 2s
+//   ⚡ Blitz in 16m 2s
 func discordContent(
     event: String?,
     seconds: Int,
@@ -294,12 +293,14 @@ func discordContent(
         lines.append("<@&\(pingRoleID)>")
     }
 
-    lines.append("\(emoji(for: event)) **\(title(for: event))**")
-
     if seconds <= 0 {
-        lines.append("✅ **jetzt da!**")
+        lines.append(
+            "\(emoji(for: event)) **\(title(for: event)) ist jetzt da!**"
+        )
     } else {
-        lines.append("⏳ **in \(formatTimer(seconds))**")
+        lines.append(
+            "\(emoji(for: event)) **\(title(for: event)) in \(formatTimer(seconds))**"
+        )
     }
 
     if let junkyardSeconds {
