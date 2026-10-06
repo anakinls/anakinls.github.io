@@ -4,7 +4,10 @@
 | --- | --- |
 | `index.html` | Site for **Roblox Event Watcher** |
 | `watcher/RobloxEventWatcher.swift` | The watcher itself (single-file Swift script) |
-| `grumble-rumble/` | The previous **Grumble Rumble** site, archived unchanged |
+
+The **Grumble Rumble** site used to live in this repository. It now has its own:
+[anakinls/grumble-rumble](https://github.com/anakinls/grumble-rumble), published at
+<https://anakinls.github.io/grumble-rumble/> — the same URL as before.
 
 ## Running the watcher
 
