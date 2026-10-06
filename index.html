@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Roblox Event Watcher</title>
-<meta name="description" content="A macOS Swift watcher that reads the Roblox garage bar with ScreenCaptureKit + Apple Vision OCR and posts a live Discord countdown for SECRET, DIAMOND and RAINBOW events.">
+<meta name="description" content="A macOS Swift watcher that reads the Roblox bottom-right event HUD with ScreenCaptureKit + Apple Vision OCR and posts a live Discord countdown for Secret, OG, Mythic and other rare events.">
 <link href="//fonts.googleapis.com/css?family=Inter:400,600,800&display=swap" rel="stylesheet">
 <style>
   :root{
@@ -120,12 +120,12 @@
 
     <div class="hero">
       <span class="tag">macOS &middot; Swift &middot; No injection</span>
-      <h1>Never miss a SECRET,<br>DIAMOND or RAINBOW garage.</h1>
+      <h1>Never miss a SECRET,<br>OG or MYTHIC drop.</h1>
       <p class="lede">
-        A single-file Swift watcher that screenshots your Roblox window, reads the garage
-        bar with Apple&rsquo;s on-device OCR, and fires an <code>@everyone</code> Discord alert the
-        moment a rare event appears &mdash; then live-edits that same message into a
-        second-by-second countdown.
+        A single-file Swift watcher that screenshots your Roblox window, reads the
+        bottom-right event HUD with Apple&rsquo;s on-device OCR, and fires an
+        <code>@everyone</code> Discord alert just before a rare event lands &mdash; then
+        live-edits that same message into a second-by-second countdown.
       </p>
       <div class="btns">
         <a class="btn" href="watcher/RobloxEventWatcher.swift" download>Download the .swift</a>
@@ -142,34 +142,34 @@
     <p class="sub">Read-only screen capture and OCR. Nothing is injected into Roblox and no memory is read.</p>
     <div class="grid">
       <div class="card">
-        <span class="emoji">🔴💎🌈</span>
-        <h3>Three tracked events</h3>
-        <p>SECRET, DIAMOND and RAINBOW, each with its own emoji in the Discord ping.</p>
+        <span class="emoji">🎯⛏️⚡</span>
+        <h3>All three HUD slots</h3>
+        <p>The named rotating event on top, Junkyard in the middle, Blitz at the bottom &mdash; each tracked separately.</p>
       </div>
       <div class="card">
-        <span class="emoji">📤</span>
-        <h3>Instant alert</h3>
-        <p>Posts as soon as an event <em>and</em> a timer are both readable &mdash; it does not wait for the last 20 seconds.</p>
+        <span class="emoji">👑</span>
+        <h3>Nine event names</h3>
+        <p>Roadway, Dragrace, Gold, Diamond, Rainbow, Mythic, Legendary, Secret and OG, each with its own emoji.</p>
+      </div>
+      <div class="card">
+        <span class="emoji">⏳</span>
+        <h3>Lead-time pings</h3>
+        <p>Stays quiet until the event is inside <code>alertLeadSeconds</code>, so a 45-minute timer isn&rsquo;t a 45-minute ping.</p>
       </div>
       <div class="card">
         <span class="emoji">⏱️</span>
         <h3>Live countdown</h3>
-        <p>One message, edited in place via <code>PATCH</code>, so the channel never gets spammed.</p>
+        <p>One message, edited in place via <code>PATCH</code>, throttled to one edit a second and backing off on HTTP 429.</p>
       </div>
       <div class="card">
-        <span class="emoji">⚡</span>
-        <h3>Adaptive polling</h3>
-        <p>25s idle, 5s once an event is known, 1s under 25 seconds remaining.</p>
+        <span class="emoji">📐</span>
+        <h3>Position-aware parsing</h3>
+        <p>Rows are matched by their Vision bounding box, not by OCR output order, so the slots never swap.</p>
       </div>
       <div class="card">
-        <span class="emoji">🔎</span>
-        <h3>OCR-error tolerant</h3>
-        <p>Levenshtein matching (distance &le; 2) plus <code>O:</code>/<code>I:</code> digit repair on the clock.</p>
-      </div>
-      <div class="card">
-        <span class="emoji">🔄</span>
-        <h3>Cycle detection</h3>
-        <p>When the timer jumps back up, state resets so the next garage gets a fresh ping.</p>
+        <span class="emoji">🗓️</span>
+        <h3>Schedule fallback</h3>
+        <p>If the name can&rsquo;t be read, a countdown landing on <code>:00</code> is Roadway and one on <code>:30</code> is Dragrace.</p>
       </div>
     </div>
   </section>
@@ -192,6 +192,11 @@ swift watcher/RobloxEventWatcher.swift</pre>
 <pre>swiftc -O watcher/RobloxEventWatcher.swift -o roblox-watcher
 ./roblox-watcher</pre>
 
+    <p class="sub">First run on a new resolution? Start it with debug output and check that all
+      three rows land inside the crop:</p>
+<pre>WATCHER_DEBUG=1 swift watcher/RobloxEventWatcher.swift
+open /tmp/roblox-debug.png</pre>
+
     <div class="note">
       <p><strong>Rotate your webhook.</strong> The webhook URL that was hard-coded in the earlier
       version of this script is a password for your channel &mdash; anyone holding it can post there.
@@ -208,17 +213,39 @@ swift watcher/RobloxEventWatcher.swift</pre>
         <code>com.roblox.RobloxPlayer</code> above 1000&times;700, and otherwise falls back to the
         largest Roblox window.</li>
       <li><strong>Capture &amp; crop.</strong> <code>SCScreenshotManager</code> grabs the window, then
-        the garage strip is cropped (30&ndash;70% across, top 2&ndash;13% down) and upscaled 3&times; with
+        the bottom-right HUD is cropped (right 42%, bottom 38%) and upscaled 3&times; with
         high-quality interpolation so small text survives OCR.</li>
       <li><strong>Recognise.</strong> <code>VNRecognizeTextRequest</code> runs at
         <code>.accurate</code> with language correction off &mdash; it must not "helpfully" turn
-        <code>RAINBOW</code> into a dictionary word.</li>
-      <li><strong>Decide.</strong> The event name is fuzzy-matched, the clock is parsed by regex as
-        <code>M:SS</code>, and Discord is sent or patched accordingly. At <code>0:00</code> the
-        countdown closes and state resets.</li>
+        <code>RAINBOW</code> into a dictionary word. Each line keeps its vertical position.</li>
+      <li><strong>Assign and decide.</strong> Lines are sorted top-to-bottom, the event name is
+        fuzzy-matched, and the three timers map onto the rotating / Junkyard / Blitz slots in that
+        order. Each slot runs its own countdown independently.</li>
     </ol>
-    <p class="sub">A copy of the cropped OCR region can be dumped to
-      <code>/tmp/roblox-debug.png</code> for tuning the crop on your own resolution.</p>
+
+    <h3 style="margin-top:26px">Reading two timer formats</h3>
+    <p class="sub">The top slot counts in <code>M:SS</code> while the lower two use
+      <code>15m 14s</code>, so the parser tries unit-suffixed durations first
+      (<code>1h 05m 14s</code>, <code>45s</code>) and clock form second
+      (<code>0:14</code>, <code>1:02:03</code>). Common OCR slips &mdash; <code>O</code> for
+      <code>0</code>, <code>I</code>/<code>l</code> for <code>1</code> &mdash; are repaired before
+      matching.</p>
+
+    <h3 style="margin-top:26px">Fuzzy matching, carefully</h3>
+    <p class="sub">Levenshtein tolerance scales with name length: 2 edits for long names like
+      <code>LEGENDARY</code>, 1 for mid-length ones, and <strong>exact match only</strong> at three
+      characters or fewer &mdash; otherwise <code>OG</code> would match almost any two-letter
+      scrap of text.</p>
+
+    <h3 style="margin-top:26px">Rotation</h3>
+    <p class="sub">The top slot runs Roadway on the hour and Dragrace on the half hour, with the
+      rarity events rotating every five minutes in between. Only the two fixed points are
+      predictable from the clock, so that inference is used solely as a fallback when OCR can&rsquo;t
+      read the label.</p>
+
+    <p class="sub">Run with <code>WATCHER_DEBUG=1</code> to print every OCR line and dump the
+      cropped region to <code>/tmp/roblox-debug.png</code> &mdash; that&rsquo;s how you retune the
+      crop for your own resolution.</p>
   </section>
 
   <section id="config">
@@ -226,13 +253,22 @@ swift watcher/RobloxEventWatcher.swift</pre>
     <p class="sub">Everything worth changing sits at the top of the file.</p>
     <table>
       <tr><th>Setting</th><th>Default</th><th>Meaning</th></tr>
-      <tr><td><code>targetEvents</code></td><td>SECRET, DIAMOND, RAINBOW</td><td>Words to watch for</td></tr>
-      <tr><td><code>normalCheckInterval</code></td><td><code>25</code></td><td>Seconds between idle checks</td></tr>
-      <tr><td><code>activeCheckInterval</code></td><td><code>5</code></td><td>Seconds between checks once an event is known</td></tr>
-      <tr><td><code>cropX</code> / <code>cropWidth</code></td><td><code>0.30</code> / <code>0.40</code></td><td>Horizontal crop, as a fraction of window width</td></tr>
-      <tr><td><code>cropY</code> / <code>cropHeight</code></td><td><code>0.02</code> / <code>0.11</code></td><td>Vertical crop, as a fraction of window height</td></tr>
+      <tr><td><code>alertEvents</code></td><td>SECRET, OG, MYTHIC, LEGENDARY, RAINBOW</td><td>Which top-slot events actually ping</td></tr>
+      <tr><td><code>alertLeadSeconds</code></td><td><code>120</code></td><td>How early the ping goes out</td></tr>
+      <tr><td><code>alertJunkyard</code> / <code>alertBlitz</code></td><td><code>false</code></td><td>Ping for the two lower slots too</td></tr>
+      <tr><td><code>knownEvents</code></td><td>9 names</td><td>Every label the OCR should recognise</td></tr>
+      <tr><td><code>idleCheckInterval</code></td><td><code>25</code></td><td>Seconds between checks when nothing is close</td></tr>
+      <tr><td><code>activeCheckInterval</code></td><td><code>5</code></td><td>Seconds between checks as an alert approaches</td></tr>
+      <tr><td><code>urgentCheckInterval</code></td><td><code>1</code></td><td>Seconds between checks while a countdown runs</td></tr>
+      <tr><td><code>cropXFraction</code> / <code>cropWidthFraction</code></td><td><code>0.58</code> / <code>0.42</code></td><td>Horizontal crop, as a fraction of window width</td></tr>
+      <tr><td><code>cropYFraction</code> / <code>cropHeightFraction</code></td><td><code>0.62</code> / <code>0.38</code></td><td>Vertical crop, as a fraction of window height</td></tr>
       <tr><td><code>DISCORD_WEBHOOK_URL</code></td><td>&mdash; (required)</td><td>Webhook, read from the environment</td></tr>
+      <tr><td><code>WATCHER_DEBUG</code></td><td>unset</td><td><code>1</code> prints OCR lines and saves the crop</td></tr>
     </table>
+
+    <p class="sub" style="margin-top:20px">Every top-slot event pings if you add it to
+      <code>alertEvents</code> &mdash; but the rotation changes every five minutes, so a full list
+      means a ping every five minutes. The default keeps it to the rare ones.</p>
   </section>
 
   <section>
