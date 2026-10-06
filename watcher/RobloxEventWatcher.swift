@@ -9,27 +9,24 @@ import Dispatch
 // CONFIG
 // ============================================================
 
-// Verfolgt wird die Event-Zeile oben. Junkyard und der
-// Weather-Trait (Blitz) werden in der Nachricht mit ausgegeben -
-// beide laufen in langem Takt, also reicht es, sie selten
-// nachzulesen.
+// Verfolgt wird die Event-Zeile oben. Der Weather-Trait (Blitz)
+// wird in der Nachricht mit ausgegeben - er läuft in langem Takt,
+// also reicht es, ihn selten nachzulesen. Junkyard braucht gar
+// kein OCR, der steht fest (siehe junkyardMinute).
 //
-// Gemessen an einem Debug-Screenshot sitzen die Zeilen bei
-// y 0.886-0.918 (Event), 0.922-0.950 (Junkyard) und 0.952-0.987
-// (Blitz) des Fensters. Die beiden unteren Crops stoßen aneinander;
-// deshalb zählt im Junkyard-Crop die oberste Zeile und im
-// Blitz-Crop die unterste.
+// Gemessen an einem Debug-Screenshot sitzt die Event-Zeile bei
+// y 0.886-0.918 und die Blitz-Zeile bei y 0.952-0.987 des Fensters.
 let cropXFraction: CGFloat = 0.88
 let cropWidthFraction: CGFloat = 0.12
 
 let eventRowY: CGFloat = 0.87
 let eventRowHeight: CGFloat = 0.06
 
-let junkyardRowY: CGFloat = 0.919
-let junkyardRowHeight: CGFloat = 0.033
-
 let blitzRowY: CGFloat = 0.951
 let blitzRowHeight: CGFloat = 0.042
+
+// Junkyard spawnt jede Stunde um :15 - das ist Rechnen, kein Lesen.
+let junkyardMinute = 15
 
 // Die HUD-Schrift ist klein - Vision liest sie deutlich besser,
 // wenn der Ausschnitt vorher hochskaliert wird.
@@ -48,8 +45,8 @@ let syncInterval: TimeInterval = 10
 let syncIntervalNearEnd: TimeInterval = 3
 let nearEndSeconds = 20
 
-// Junkyard und Blitz laufen über viele Minuten - einmal pro Minute
-// nachlesen reicht völlig, dazwischen zählen auch sie lokal weiter.
+// Der Blitz läuft in langem Takt - einmal pro Minute nachlesen
+// reicht völlig, dazwischen zählt auch er lokal weiter.
 let sideRowSyncInterval: TimeInterval = 60
 
 // Höchstens alle fünf Sekunden editieren. Die angezeigte Zahl
@@ -211,9 +208,8 @@ final class WatcherState {
     var deadline: Date?
     var event: String?
 
-    // Junkyard und Weather-Trait: gleiche Mechanik, nur viel
-    // seltener gelesen.
-    var junkyardDeadline: Date?
+    // Weather-Trait: gleiche Mechanik wie das Event, nur viel
+    // seltener gelesen. Junkyard steht fest und wird gerechnet.
     var blitzDeadline: Date?
 
     var nextSync = Date()
@@ -231,21 +227,13 @@ final class WatcherState {
         return max(0, Int(deadline.timeIntervalSinceNow.rounded()))
     }
 
-    private func remaining(until date: Date?) -> Int? {
+    var blitzRemaining: Int? {
 
-        guard let date else {
+        guard let blitzDeadline else {
             return nil
         }
 
-        return max(0, Int(date.timeIntervalSinceNow.rounded()))
-    }
-
-    var junkyardRemaining: Int? {
-        remaining(until: junkyardDeadline)
-    }
-
-    var blitzRemaining: Int? {
-        remaining(until: blitzDeadline)
+        return max(0, Int(blitzDeadline.timeIntervalSinceNow.rounded()))
     }
 }
 
@@ -1038,14 +1026,13 @@ func parseUnitsTimer(from line: String) -> Int? {
 }
 
 // ============================================================
-// JUNKYARD / BLITZ
+// WEATHER-TRAIT
 // ============================================================
 
-// Beide Zeilen stehen im "42m 47s"-Format und werden aus demselben
-// Screenshot geschnitten. Die Crops stoßen aneinander, deshalb
-// entscheidet die Position: im Junkyard-Crop zählt die oberste
-// Zeile, im Blitz-Crop die unterste. Ein hineinragender Streifen
-// der Nachbarzeile wird so nicht verwechselt.
+// Die Blitz-Zeile steht im "42m 47s"-Format und wird aus demselben
+// Screenshot geschnitten. preferTop entscheidet, welche Zeile zählt,
+// falls ein Streifen der Nachbarzeile in den Crop ragt - beim Blitz
+// die unterste.
 func readUnitsRow(
     from fullImage: CGImage,
     yFraction: CGFloat,
@@ -1090,6 +1077,30 @@ func readUnitsRow(
 // ============================================================
 // ZEITPLAN
 // ============================================================
+
+// Sekunden bis zur nächsten vollen Minute X der Stunde.
+// Steht die Uhr genau darauf, ist der Spawn gerade durch und der
+// nächste kommt in einer Stunde.
+func secondsUntil(minute targetMinute: Int) -> Int {
+
+    let parts = Calendar.current.dateComponents(
+        [.minute, .second],
+        from: Date()
+    )
+
+    let elapsed = (parts.minute ?? 0) * 60 + (parts.second ?? 0)
+    let target = targetMinute * 60
+
+    let delta = target - elapsed
+
+    return delta > 0 ? delta : delta + 3600
+}
+
+// Junkyard spawnt jede Stunde zur selben Minute - dafür braucht es
+// keinen Screenshot.
+func junkyardRemaining() -> Int {
+    secondsUntil(minute: junkyardMinute)
+}
 
 // ROADWAY startet um :55, DRAGRACE um :25 - jeweils fünf Minuten
 // vor der vollen bzw. halben Stunde. Wenn OCR den Namen nicht
@@ -1159,7 +1170,7 @@ func finishLiveMessage() async {
         content: discordContent(
             event: live.event,
             seconds: 0,
-            junkyardSeconds: state.junkyardRemaining,
+            junkyardSeconds: junkyardRemaining(),
             blitzSeconds: state.blitzRemaining,
             mention: false
         )
@@ -1191,7 +1202,7 @@ func startNewMessage(
         content: discordContent(
             event: event,
             seconds: seconds,
-            junkyardSeconds: state.junkyardRemaining,
+            junkyardSeconds: junkyardRemaining(),
             blitzSeconds: state.blitzRemaining,
             mention: shouldPing
         )
@@ -1227,7 +1238,7 @@ func tickCountdown() async {
             content: discordContent(
                 event: state.event,
                 seconds: 0,
-                junkyardSeconds: state.junkyardRemaining,
+                junkyardSeconds: junkyardRemaining(),
             blitzSeconds: state.blitzRemaining,
                 mention: false
             )
@@ -1254,7 +1265,7 @@ func tickCountdown() async {
         content: discordContent(
             event: state.event,
             seconds: seconds,
-            junkyardSeconds: state.junkyardRemaining,
+            junkyardSeconds: junkyardRemaining(),
             blitzSeconds: state.blitzRemaining,
             mention: false
         )
@@ -1292,27 +1303,16 @@ func performSync() async {
         }
 
         // ----------------------------------------------------
-        // JUNKYARD UND WEATHER-TRAIT
+        // WEATHER-TRAIT
         // ----------------------------------------------------
         //
-        // Beide laufen über viele Minuten, also selten nachlesen -
-        // aus demselben Screenshot, nur anders zugeschnitten.
+        // Läuft über viele Minuten, also selten nachlesen - aus
+        // demselben Screenshot, nur anders zugeschnitten.
 
         if Date() >= state.nextSideRowSync {
 
             state.nextSideRowSync =
                 Date().addingTimeInterval(sideRowSyncInterval)
-
-            if let seconds = readUnitsRow(
-                from: fullImage,
-                yFraction: junkyardRowY,
-                heightFraction: junkyardRowHeight,
-                preferTop: true,
-                label: "Junkyard"
-            ) {
-                state.junkyardDeadline =
-                    Date().addingTimeInterval(TimeInterval(seconds))
-            }
 
             if let seconds = readUnitsRow(
                 from: fullImage,
@@ -1451,6 +1451,8 @@ print("       ROBLOX EVENT WATCHER")
 print("==============================================")
 print("")
 print("Verfolgt: nur die Event-Zeile oben")
+print("Junkyard: gerechnet, jede Stunde :\(junkyardMinute)")
+print("Blitz: aus dem HUD, einmal pro Minute")
 print("Ping-Rolle: \(pingRoleID.isEmpty ? "kein Ping" : pingRoleID)")
 print("Ping bei: \(alertEvents.sorted().joined(separator: ", "))")
 print("Unbekannter Name: \(alertUnknownEvent ? "pingt trotzdem" : "kein Ping")")
