@@ -143,33 +143,38 @@
     <div class="grid">
       <div class="card">
         <span class="emoji">🎯⛏️⚡</span>
-        <h3>All three HUD slots</h3>
-        <p>The named rotating event on top, Junkyard in the middle, Blitz at the bottom &mdash; each tracked separately.</p>
+        <h3>One row read</h3>
+        <p>Only the event row is captured at all. Junkyard and Blitz are fixed hourly spawns, so they are arithmetic, not pixels.</p>
       </div>
       <div class="card">
         <span class="emoji">👑</span>
-        <h3>Nine event names</h3>
-        <p>Roadway, Dragrace, Gold, Diamond, Rainbow, Mythic, Legendary, Secret and OG, each with its own emoji.</p>
+        <h3>Nine events, two languages</h3>
+        <p>Roadway, Dragrace, Gold, Diamond, Rainbow, Mythic, Legendary, Secret and OG &mdash; matched in English <em>and</em> German, since the HUD mixes both.</p>
       </div>
       <div class="card">
         <span class="emoji">⏳</span>
-        <h3>Lead-time pings</h3>
-        <p>Stays quiet until the event is inside <code>alertLeadSeconds</code>, so a 45-minute timer isn&rsquo;t a 45-minute ping.</p>
+        <h3>Message per cycle</h3>
+        <p>One on startup, then one for each new event &mdash; detected by the timer resetting, so the same event twice in a row still gets its own.</p>
       </div>
       <div class="card">
         <span class="emoji">⏱️</span>
         <h3>Live countdown</h3>
-        <p>One message, edited in place via <code>PATCH</code>, throttled to one edit a second and backing off on HTTP 429.</p>
+        <p>Each message is edited in place every five seconds, trading a little staleness for far fewer webhook edits per cycle.</p>
+      </div>
+      <div class="card">
+        <span class="emoji">🔔</span>
+        <h3>Role ping per event</h3>
+        <p>Pings one configured role &mdash; never <code>@everyone</code> &mdash; with a fresh message for each new event, so every cycle notifies.</p>
       </div>
       <div class="card">
         <span class="emoji">📐</span>
-        <h3>Position-aware parsing</h3>
-        <p>Rows are matched by their Vision bounding box, not by OCR output order, so the slots never swap.</p>
+        <h3>Format-filtered</h3>
+        <p>Only <code>M:SS</code> lines count, so a sliver of the Junkyard row leaking into the crop is rejected rather than misread.</p>
       </div>
       <div class="card">
         <span class="emoji">🗓️</span>
         <h3>Schedule fallback</h3>
-        <p>If the name can&rsquo;t be read, a countdown landing on <code>:00</code> is Roadway and one on <code>:30</code> is Dragrace.</p>
+        <p>If the name can&rsquo;t be read, a countdown landing on <code>:55</code> is Roadway and one on <code>:25</code> is Dragrace.</p>
       </div>
     </div>
   </section>
@@ -193,9 +198,12 @@ swift watcher/RobloxEventWatcher.swift</pre>
 ./roblox-watcher</pre>
 
     <p class="sub">First run on a new resolution? Start it with debug output and check that all
-      three rows land inside the crop:</p>
-<pre>WATCHER_DEBUG=1 swift watcher/RobloxEventWatcher.swift
-open /tmp/roblox-debug.png</pre>
+      the event row lands inside the crop:</p>
+<pre>WATCHER_DEBUG=1 WATCHER_TEST=1 swift watcher/RobloxEventWatcher.swift
+open ~/Desktop/roblox-debug.png</pre>
+
+    <p class="sub"><code>WATCHER_TEST=1</code> posts one message to the webhook at startup, so you
+      know the Discord side works before waiting on an event.</p>
 
     <div class="note">
       <p><strong>Rotate your webhook.</strong> The webhook URL that was hard-coded in the earlier
@@ -213,38 +221,78 @@ open /tmp/roblox-debug.png</pre>
         <code>com.roblox.RobloxPlayer</code> above 1000&times;700, and otherwise falls back to the
         largest Roblox window.</li>
       <li><strong>Capture &amp; crop.</strong> <code>SCScreenshotManager</code> grabs the window, then
-        the bottom-right HUD is cropped (right 42%, bottom 38%) and upscaled 3&times; with
+        the bottom-right HUD is cropped (the last 16% in each direction) and upscaled 6&times; with
         high-quality interpolation so small text survives OCR.</li>
       <li><strong>Recognise.</strong> <code>VNRecognizeTextRequest</code> runs at
         <code>.accurate</code> with language correction off &mdash; it must not "helpfully" turn
-        <code>RAINBOW</code> into a dictionary word. Each line keeps its vertical position.</li>
-      <li><strong>Assign and decide.</strong> Lines are sorted top-to-bottom, the event name is
-        fuzzy-matched, and the three timers map onto the rotating / Junkyard / Blitz slots in that
-        order. Each slot runs its own countdown independently.</li>
+        <code>RAINBOW</code> into a dictionary word. Each line keeps its vertical position and its
+        top three candidate readings.</li>
+      <li><strong>Decide.</strong> The event name is fuzzy-matched and the <code>M:SS</code> timer
+        becomes a deadline. A jump in that deadline &mdash; not a change of name &mdash; marks the
+        next cycle.</li>
     </ol>
 
-    <h3 style="margin-top:26px">Reading two timer formats</h3>
-    <p class="sub">The top slot counts in <code>M:SS</code> while the lower two use
-      <code>15m 14s</code>, so the parser tries unit-suffixed durations first
-      (<code>1h 05m 14s</code>, <code>45s</code>) and clock form second
-      (<code>0:14</code>, <code>1:02:03</code>). Common OCR slips &mdash; <code>O</code> for
-      <code>0</code>, <code>I</code>/<code>l</code> for <code>1</code> &mdash; are repaired before
-      matching.</p>
+    <h3 style="margin-top:26px">OCR syncs a clock, it doesn&rsquo;t drive the countdown</h3>
+    <p class="sub">A screenshot every second to show a ticking number would be wasteful and fragile.
+      Instead each reading is converted into a <em>deadline</em>, and the remaining time comes from
+      the system clock after that. OCR only re-syncs, every ten seconds, and a disagreement of one
+      or two seconds is treated as HUD rounding and ignored so the display never jitters. The useful
+      side effect: a frame Vision fails to read no longer stalls the countdown &mdash; it just keeps
+      ticking until the next successful sync.</p>
+
+    <h3 style="margin-top:26px">One message per event</h3>
+    <p class="sub">One message goes out when the watcher starts, and one for every event after
+      that. Within a cycle that message is edited in place, at most every two seconds, which keeps
+      it under the webhook rate limit (with <code>retry_after</code> honoured on HTTP 429). Only a
+      new message notifies &mdash; an edit never does &mdash; so a new event every five minutes is
+      a ping every five minutes, for the events listed in <code>alertEvents</code>; the rest post
+      quietly.</p>
+
+    <p class="sub">The next cycle is detected by the <em>deadline jumping forward</em>, not by the
+      name changing. The rotation can serve the same event twice in a row, and that second one is a
+      genuine new event deserving its own message &mdash; a name comparison would have swallowed
+      it.</p>
+
+    <h3 style="margin-top:26px">One crop, because only one row is unknown</h3>
+    <p class="sub">The event row is the only one tracked: it is what changes, and spending the
+      whole frame on it is what makes the small label legible. If a sliver of the Junkyard row
+      leaks into that crop the format filter drops it &mdash; that row counts in
+      <code>51m 36s</code> while the event row always counts in <code>1:36</code>, and only
+      <code>M:SS</code> is accepted there.</p>
+    <p class="sub"><strong>Junkyard and Blitz are never read.</strong> Both spawn at a fixed minute
+      past every hour &mdash; <code>:15</code> and <code>:45</code> &mdash; so their countdowns are
+      arithmetic on the system clock. No crop, no OCR, nothing to misread, and they stay correct
+      even while the game window is hidden. Each line still gets the format the game uses for it:
+      <code>0:47</code> for the event, <code>25m 47s</code> for the other two.</p>
+    <p class="sub">That leaves exactly one thing on screen worth reading, which is the whole reason
+      the crop can be this tight.</p>
+
+    <h3 style="margin-top:26px">Reading the event name</h3>
+    <p class="sub">The orange label is the smallest text on screen and the hardest to read, so it
+      gets three passes. The crop is upscaled 6&times; and <code>minimumTextHeight</code> is lowered
+      so Vision doesn&rsquo;t discard it; every one of Vision&rsquo;s top three candidate readings is
+      fuzzy-matched, not just the best; and if a timer was found but no name, the frame is re-run
+      <em>with</em> language correction and the nine event names supplied as
+      <code>customWords</code>. That pass only runs when the first came up empty.</p>
 
     <h3 style="margin-top:26px">Fuzzy matching, carefully</h3>
-    <p class="sub">Levenshtein tolerance scales with name length: 2 edits for long names like
-      <code>LEGENDARY</code>, 1 for mid-length ones, and <strong>exact match only</strong> at three
-      characters or fewer &mdash; otherwise <code>OG</code> would match almost any two-letter
-      scrap of text.</p>
+    <p class="sub">The game runs in German and translates some names but not others &mdash;
+      <code>Mythisch</code> for Mythic, yet <code>Rainbow</code> unchanged. Every event therefore
+      maps a canonical name to all the spellings that can appear, matched longest-first so
+      <code>GOLDEN</code> wins over <code>GOLD</code>. Levenshtein tolerance scales with length: 2
+      edits for long names, 1 for mid-length, and <strong>exact match only</strong> at three
+      characters or fewer &mdash; otherwise <code>OG</code> would match almost any two-letter scrap
+      of text.</p>
 
     <h3 style="margin-top:26px">Rotation</h3>
-    <p class="sub">The top slot runs Roadway on the hour and Dragrace on the half hour, with the
-      rarity events rotating every five minutes in between. Only the two fixed points are
-      predictable from the clock, so that inference is used solely as a fallback when OCR can&rsquo;t
-      read the label.</p>
+    <p class="sub">The top slot runs <strong>Roadway at <code>:55</code></strong> and
+      <strong>Dragrace at <code>:25</code></strong> &mdash; each five minutes before the hour and
+      half hour &mdash; with rarity events on the remaining five-minute marks. Only those two fixed
+      points are predictable from the clock, so that inference is used solely as a fallback when OCR
+      can&rsquo;t read the label.</p>
 
     <p class="sub">Run with <code>WATCHER_DEBUG=1</code> to print every OCR line and dump the
-      cropped region to <code>/tmp/roblox-debug.png</code> &mdash; that&rsquo;s how you retune the
+      cropped region to <code>~/Desktop/roblox-debug.png</code> &mdash; that&rsquo;s how you retune the
       crop for your own resolution.</p>
   </section>
 
@@ -253,17 +301,22 @@ open /tmp/roblox-debug.png</pre>
     <p class="sub">Everything worth changing sits at the top of the file.</p>
     <table>
       <tr><th>Setting</th><th>Default</th><th>Meaning</th></tr>
-      <tr><td><code>alertEvents</code></td><td>SECRET, OG, MYTHIC, LEGENDARY, RAINBOW</td><td>Which top-slot events actually ping</td></tr>
-      <tr><td><code>alertLeadSeconds</code></td><td><code>120</code></td><td>How early the ping goes out</td></tr>
-      <tr><td><code>alertJunkyard</code> / <code>alertBlitz</code></td><td><code>false</code></td><td>Ping for the two lower slots too</td></tr>
-      <tr><td><code>knownEvents</code></td><td>9 names</td><td>Every label the OCR should recognise</td></tr>
-      <tr><td><code>idleCheckInterval</code></td><td><code>25</code></td><td>Seconds between checks when nothing is close</td></tr>
-      <tr><td><code>activeCheckInterval</code></td><td><code>5</code></td><td>Seconds between checks as an alert approaches</td></tr>
-      <tr><td><code>urgentCheckInterval</code></td><td><code>1</code></td><td>Seconds between checks while a countdown runs</td></tr>
-      <tr><td><code>cropXFraction</code> / <code>cropWidthFraction</code></td><td><code>0.58</code> / <code>0.42</code></td><td>Horizontal crop, as a fraction of window width</td></tr>
-      <tr><td><code>cropYFraction</code> / <code>cropHeightFraction</code></td><td><code>0.62</code> / <code>0.38</code></td><td>Vertical crop, as a fraction of window height</td></tr>
+      <tr><td><code>alertEvents</code></td><td>SECRET, OG, MYTHIC, LEGENDARY, RAINBOW</td><td>Which events ping the role; the rest post silently</td></tr>
+      <tr><td><code>alertUnknownEvent</code></td><td><code>true</code></td><td>Ping even when the label can&rsquo;t be read</td></tr>
+      <tr><td><code>pingRoleID</code></td><td>a role ID</td><td>Role mentioned on a new message; empty = no ping</td></tr>
+      <tr><td><code>newCycleToleranceSeconds</code></td><td><code>10</code></td><td>Deadline jump that counts as the next event</td></tr>
+      <tr><td><code>syncInterval</code> / <code>syncIntervalNearEnd</code></td><td><code>10</code> / <code>3</code></td><td>Seconds between OCR re-syncs, normally and near zero</td></tr>
+      <tr><td><code>tickSeconds</code></td><td><code>1</code></td><td>Main loop tick; how fast the message is refreshed</td></tr>
+      <tr><td><code>resyncToleranceSeconds</code></td><td><code>2</code></td><td>Disagreement the local clock is allowed before OCR wins</td></tr>
+      <tr><td><code>editGap</code></td><td><code>5</code></td><td>Minimum seconds between edits; the display lags by up to this</td></tr>
+      <tr><td><code>eventAliases</code></td><td>9 events</td><td>Canonical name &rarr; every spelling the HUD may show</td></tr>
+      <tr><td><code>cropXFraction</code> / <code>cropWidthFraction</code></td><td><code>0.88</code> / <code>0.12</code></td><td>Horizontal crop, as a fraction of window width</td></tr>
+      <tr><td><code>junkyardMinute</code> / <code>blitzMinute</code></td><td><code>15</code> / <code>45</code></td><td>Minutes past the hour they spawn; neither is read</td></tr>
+      <tr><td><code>eventRowY</code> / <code>eventRowHeight</code></td><td><code>0.87</code> / <code>0.06</code></td><td>The event row &mdash; the only row that is tracked</td></tr>
+      <tr><td><code>ocrUpscale</code></td><td><code>6</code></td><td>How much the crop is enlarged before OCR</td></tr>
       <tr><td><code>DISCORD_WEBHOOK_URL</code></td><td>&mdash; (required)</td><td>Webhook, read from the environment</td></tr>
       <tr><td><code>WATCHER_DEBUG</code></td><td>unset</td><td><code>1</code> prints OCR lines and saves the crop</td></tr>
+      <tr><td><code>WATCHER_TEST</code></td><td>unset</td><td><code>1</code> sends one test message at startup</td></tr>
     </table>
 
     <p class="sub" style="margin-top:20px">Every top-slot event pings if you add it to

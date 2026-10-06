@@ -9,34 +9,57 @@ import Dispatch
 // CONFIG
 // ============================================================
 
-// Poll-Intervalle (Sekunden)
-let idleCheckInterval: UInt64 = 25
-let activeCheckInterval: UInt64 = 5
-let urgentCheckInterval: UInt64 = 1
+// Gelesen wird nur die Event-Zeile oben - sie ist die einzige, die
+// sich nicht ausrechnen lässt. Gemessen an einem Debug-Screenshot
+// sitzt sie bei y 0.886-0.918 des Fensters.
+let cropXFraction: CGFloat = 0.88
+let cropWidthFraction: CGFloat = 0.12
 
-// Erst ab hier wird gepingt und der Countdown live mitgeschrieben.
-// Die HUD-Timer laufen bis zu einer Stunde - ohne Vorlauf-Grenze
-// würden wir eine Stunde lang jede Sekunde editieren.
-let alertLeadSeconds = 120
+let eventRowY: CGFloat = 0.87
+let eventRowHeight: CGFloat = 0.06
 
-// Oberer Slot: "garantierte" Events.
-// ROADWAY  -> jede volle Stunde (:00)
-// DRAGRACE -> jede halbe Stunde (:30)
-// dazwischen alle 5 Minuten eines der Rarity-Events.
-let knownEvents = [
-    "ROADWAY",
-    "DRAGRACE",
-    "GOLD",
-    "DIAMOND",
-    "RAINBOW",
-    "MYTHIC",
-    "LEGENDARY",
-    "SECRET",
-    "OG"
-]
+// Junkyard und Blitz spawnen jede Stunde zur selben Minute, :15 und
+// :45. Das ist Rechnen, kein Lesen - und nichts, was OCR falsch
+// machen könnte.
+let junkyardMinute = 15
+let blitzMinute = 45
 
-// Nur diese Events lösen einen Discord-Ping aus.
-// Alles eintragen = Ping alle 5 Minuten, also bewusst klein halten.
+// Die HUD-Schrift ist klein - Vision liest sie deutlich besser,
+// wenn der Ausschnitt vorher hochskaliert wird.
+let ocrUpscale = 6
+
+// Takt der Hauptschleife. Daran hängt, wie schnell die Discord-
+// Nachricht nachgezogen wird - nicht, wie oft OCR läuft.
+let tickSeconds: UInt64 = 1
+
+// OCR-Abgleich. Zwischen zwei Lesungen zählt die lokale Uhr
+// weiter, deshalb reicht ein Abgleich alle paar Sekunden.
+let syncInterval: TimeInterval = 10
+
+// Kurz vor Ablauf dichter prüfen, damit der Wechsel auf das
+// nächste Event schnell auffällt.
+let syncIntervalNearEnd: TimeInterval = 3
+let nearEndSeconds = 20
+
+// Höchstens alle fünf Sekunden editieren. Die angezeigte Zahl
+// hinkt damit bis zu fünf Sekunden hinterher, dafür bleibt die
+// Zahl der Webhook-Edits pro Zyklus niedrig.
+let editGap: TimeInterval = 5
+
+// Weicht die OCR-Lesung um mehr als das vom lokal gezählten Wert
+// ab, gilt die Lesung.
+let resyncToleranceSeconds = 2
+
+// Ab dieser Abweichung im Ablaufzeitpunkt ist es ein neuer Zyklus
+// und damit ein neues Event - auch wenn es wieder dasselbe heißt.
+let newCycleToleranceSeconds: TimeInterval = 10
+
+// Rolle, die gepingt wird. Leer lassen = kein Ping.
+let pingRoleID = "1555684515140341903"
+
+// Jeder Zyklus bekommt eine eigene Nachricht. Gepingt wird aber
+// nur bei diesen Events - alles andere wird still gepostet.
+// Alle Namen eintragen = jedes Mal ein Ping.
 let alertEvents: Set<String> = [
     "SECRET",
     "OG",
@@ -45,20 +68,56 @@ let alertEvents: Set<String> = [
     "RAINBOW"
 ]
 
-// Die beiden unteren Slots sind dauerhaft sichtbar und laufen
-// unabhängig vom oberen Slot.
-let alertJunkyard = false
-let alertBlitz = false
+// Auch pingen, wenn der Name nicht lesbar war.
+let alertUnknownEvent = true
 
-// Crop auf das HUD unten rechts, relativ zur Fenstergröße.
-// Mit WATCHER_DEBUG=1 wird der Ausschnitt als PNG abgelegt,
-// damit sich das auf einer anderen Auflösung nachziehen lässt.
-let cropXFraction: CGFloat = 0.58
-let cropYFraction: CGFloat = 0.62
-let cropWidthFraction: CGFloat = 0.42
-let cropHeightFraction: CGFloat = 0.38
+// Das Spiel läuft auf Deutsch und übersetzt einen Teil der Namen
+// ("Mythisch"), einen Teil nicht ("Rainbow"). Links der kanonische
+// Name, rechts alles, was im HUD stehen kann.
+let eventAliases: [String: [String]] = [
+    "ROADWAY":   ["ROADWAY", "FAHRBAHN"],
+    "DRAGRACE":  ["DRAGRACE", "DRAG RACE", "DRAGRENNEN"],
+    "GOLD":      ["GOLD", "GOLDEN"],
+    "DIAMOND":   ["DIAMOND", "DIAMANT"],
+    "RAINBOW":   ["RAINBOW", "REGENBOGEN"],
+    "MYTHIC":    ["MYTHIC", "MYTHISCH"],
+    "LEGENDARY": ["LEGENDARY", "LEGENDÄR", "LEGENDAER", "LEGENDAR"],
+    "SECRET":    ["SECRET", "GEHEIM", "GEHEIMNIS"],
+    "OG":        ["OG"]
+]
 
-let debugScreenshotPath = "/tmp/roblox-debug.png"
+// Alle Schreibweisen, längste zuerst: so gewinnt "GOLDEN" vor
+// "GOLD" und "OG" kann nicht in einem längeren Wort zuschlagen.
+//
+// Ausgeschrieben statt als flatMap/map-Kette: der Type-Checker
+// braucht für die Kette mit benannten Tupeln zu lange und bricht ab.
+let eventSpellings: [(canonical: String, spelling: String)] = {
+
+    var pairs: [(canonical: String, spelling: String)] = []
+
+    for (canonical, spellings) in eventAliases {
+        for spelling in spellings {
+            pairs.append((canonical: canonical, spelling: spelling))
+        }
+    }
+
+    pairs.sort { lhs, rhs in
+
+        if lhs.spelling.count != rhs.spelling.count {
+            return lhs.spelling.count > rhs.spelling.count
+        }
+
+        return lhs.spelling < rhs.spelling
+    }
+
+    return pairs
+}()
+
+// Landet auf dem Schreibtisch, damit man es ohne Umweg über den
+// Finder findet und weiterschicken kann.
+let debugScreenshotPath =
+    (NSHomeDirectory() as NSString)
+        .appendingPathComponent("Desktop/roblox-debug.png")
 
 // ============================================================
 // CORE GRAPHICS / APP
@@ -73,12 +132,17 @@ let debugEnabled =
     ProcessInfo.processInfo
         .environment["WATCHER_DEBUG"] == "1"
 
+// Beim Start einmal an Discord schicken, um den Webhook zu prüfen.
+let testEnabled =
+    ProcessInfo.processInfo
+        .environment["WATCHER_TEST"] == "1"
+
 // ============================================================
 // DISCORD CONFIG
 // ============================================================
 
-// Der Webhook wird aus der Umgebungsvariable DISCORD_WEBHOOK_URL gelesen,
-// damit er NIE in diesem öffentlichen Repository landet.
+// Der Webhook wird aus der Umgebungsvariable DISCORD_WEBHOOK_URL
+// gelesen, damit er NIE in diesem öffentlichen Repository landet.
 //
 //   export DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..."
 //   swift watcher/RobloxEventWatcher.swift
@@ -96,83 +160,69 @@ else {
 }
 
 // ============================================================
-// SLOTS
-// ============================================================
-
-enum Slot: String, CaseIterable {
-    case rotating
-    case junkyard
-    case blitz
-
-    var emoji: String {
-        switch self {
-        case .rotating: return "🎯"
-        case .junkyard: return "⛏️"
-        case .blitz:    return "⚡"
-        }
-    }
-
-    var label: String {
-        switch self {
-        case .rotating: return "Event"
-        case .junkyard: return "Junkyard"
-        case .blitz:    return "Blitz"
-        }
-    }
-}
-
-// Was eine einzelne OCR-Runde aus dem HUD gelesen hat.
-struct HUDReading {
-    var rotatingEvent: String? = nil
-    var seconds: [Slot: Int] = [:]
-
-    var isEmpty: Bool {
-        seconds.isEmpty
-    }
-}
-
-// ============================================================
 // STATE
 // ============================================================
 
-final class Countdown {
-    let slot: Slot
-    let title: String
-    let messageID: String
+// Die laufende Discord-Nachricht. Eine pro Event-Zyklus.
+final class LiveMessage {
+    let id: String
+    let cycleDeadline: Date
+
+    var event: String?
     var lastShownSeconds: Int
     var lastEditAt: Date
+    var finished: Bool
+
+    var title: String {
+        event ?? "EVENT (Name nicht lesbar)"
+    }
 
     init(
-        slot: Slot,
-        title: String,
-        messageID: String,
+        id: String,
+        cycleDeadline: Date,
+        event: String?,
         lastShownSeconds: Int
     ) {
-        self.slot = slot
-        self.title = title
-        self.messageID = messageID
+        self.id = id
+        self.cycleDeadline = cycleDeadline
+        self.event = event
         self.lastShownSeconds = lastShownSeconds
         self.lastEditAt = Date()
+        self.finished = false
     }
 }
 
 final class WatcherState {
-    var active: [Slot: Countdown] = [:]
-    var lastSeconds: [Slot: Int] = [:]
-    var lastRotatingEvent: String?
-    var currentInterval: UInt64 = idleCheckInterval
+    var live: LiveMessage?
 
-    // Nach einem 429 vor diesem Zeitpunkt nichts mehr an Discord schicken.
+    // Ablaufzeitpunkt des laufenden Events. Die Restzeit kommt
+    // danach aus der Uhr, nicht aus dem nächsten Screenshot.
+    var deadline: Date?
+    var event: String?
+
+    var nextSync = Date()
+
+    // Nach einem 429 vor diesem Zeitpunkt nichts mehr senden.
     var discordBlockedUntil: Date?
+
+    var remaining: Int {
+
+        guard let deadline else {
+            return 0
+        }
+
+        return max(0, Int(deadline.timeIntervalSinceNow.rounded()))
+    }
 }
 
 let state = WatcherState()
 
 // ============================================================
-// EVENT EMOJI
+// DARSTELLUNG
 // ============================================================
 
-func emoji(for event: String) -> String {
+func emoji(for event: String?) -> String {
+
     switch event {
     case "RAINBOW":   return "🌈"
     case "DIAMOND":   return "💎"
@@ -187,11 +237,25 @@ func emoji(for event: String) -> String {
     }
 }
 
-// ============================================================
-// TIMER FORMAT
-// ============================================================
+func title(for event: String?) -> String {
+    event ?? "EVENT (Name nicht lesbar)"
+}
 
+// Wie im Spiel: M:SS, auch unter einer Minute.
 func formatTimer(_ totalSeconds: Int) -> String {
+
+    let safe = max(0, totalSeconds)
+
+    return String(
+        format: "%d:%02d",
+        safe / 60,
+        safe % 60
+    )
+}
+
+// Der Blitz steht im Spiel als "42m 47s" da, nicht als Uhrzeit.
+func formatUnits(_ totalSeconds: Int) -> String {
+
     let safe = max(0, totalSeconds)
 
     let hours = safe / 3600
@@ -199,74 +263,52 @@ func formatTimer(_ totalSeconds: Int) -> String {
     let seconds = safe % 60
 
     if hours > 0 {
-        return String(
-            format: "%dh %02dm %02ds",
-            hours,
-            minutes,
-            seconds
-        )
+        return "\(hours)h \(minutes)m \(seconds)s"
     }
 
     if minutes > 0 {
-        return String(
-            format: "%dm %02ds",
-            minutes,
-            seconds
-        )
+        return "\(minutes)m \(seconds)s"
     }
 
     return "\(seconds)s"
 }
 
-// ============================================================
-// DISCORD CONTENT
-// ============================================================
-
+// Untereinander, eine Zeile pro Sache - Symbol, Name, Zeit:
+//
+//   @Rolle
+//   🏁 DRAGRACE in 1:02
+//   ⛏️ Junkyard in 46m 2s
+//   ⚡ Blitz in 16m 2s
 func discordContent(
-    title: String,
-    headlineEmoji: String,
+    event: String?,
     seconds: Int,
-    reading: HUDReading,
+    junkyardSeconds: Int?,
+    blitzSeconds: Int?,
     mention: Bool
 ) -> String {
 
     var lines: [String] = []
 
-    let prefix = mention ? "@everyone " : ""
+    if mention, !pingRoleID.isEmpty {
+        lines.append("<@&\(pingRoleID)>")
+    }
 
     if seconds <= 0 {
         lines.append(
-            "\(prefix)\(headlineEmoji) **\(title) IST DA!**"
+            "\(emoji(for: event)) **\(title(for: event)) ist jetzt da!**"
         )
     } else {
         lines.append(
-            "\(prefix)\(headlineEmoji) **\(title)**"
-        )
-        lines.append("")
-        lines.append(
-            "⏳ **noch \(formatTimer(seconds))**"
+            "\(emoji(for: event)) **\(title(for: event)) in \(formatTimer(seconds))**"
         )
     }
 
-    // Die beiden Dauer-Slots als Kontext mitschicken.
-    var context: [String] = []
-
-    for slot in [Slot.junkyard, Slot.blitz] {
-
-        guard let slotSeconds = reading.seconds[slot] else {
-            continue
-        }
-
-        context.append(
-            "\(slot.emoji) \(slot.label): \(formatTimer(slotSeconds))"
-        )
+    if let junkyardSeconds {
+        lines.append("⛏️ Junkyard **in \(formatUnits(junkyardSeconds))**")
     }
 
-    if !context.isEmpty {
-        lines.append("")
-        lines.append(
-            context.joined(separator: "   •   ")
-        )
+    if let blitzSeconds {
+        lines.append("⚡ Blitz **in \(formatUnits(blitzSeconds))**")
     }
 
     return lines.joined(separator: "\n")
@@ -311,7 +353,9 @@ func applyRateLimit(
         Date().addingTimeInterval(retryAfter)
 
     print(
-        "⏸️ Discord Rate-Limit: pausiere \(String(format: "%.1f", retryAfter))s"
+        "⏸️ Discord Rate-Limit: pausiere "
+        + String(format: "%.1f", retryAfter)
+        + "s"
     )
 }
 
@@ -326,14 +370,17 @@ func sendDiscordMessage(content: String) async -> String? {
         return nil
     }
 
-    print("📤 Sende Discord-Nachricht...")
+    // Nur die konfigurierte Rolle darf benachrichtigt werden,
+    // ausdrücklich nicht @everyone.
+    let allowedMentions: [String: Any] =
+        pingRoleID.isEmpty
+            ? ["parse": []]
+            : ["parse": [], "roles": [pingRoleID]]
 
     let payload: [String: Any] = [
         "username": "Roblox Event Watcher",
         "content": content,
-        "allowed_mentions": [
-            "parse": ["everyone"]
-        ]
+        "allowed_mentions": allowedMentions
     ]
 
     guard let body = try? JSONSerialization.data(
@@ -357,16 +404,12 @@ func sendDiscordMessage(content: String) async -> String? {
     var queryItems = components.queryItems ?? []
 
     queryItems.append(
-        URLQueryItem(
-            name: "wait",
-            value: "true"
-        )
+        URLQueryItem(name: "wait", value: "true")
     )
 
     components.queryItems = queryItems
 
     guard let requestURL = components.url else {
-
         print("❌ Discord Request-URL ungültig.")
         return nil
     }
@@ -390,18 +433,12 @@ func sendDiscordMessage(content: String) async -> String? {
 
         guard let httpResponse = response as? HTTPURLResponse
         else {
-
             print("❌ Ungültige Discord-Antwort.")
             return nil
         }
 
         if httpResponse.statusCode == 429 {
-
-            applyRateLimit(
-                data: data,
-                fallbackSeconds: 5
-            )
-
+            applyRateLimit(data: data, fallbackSeconds: 5)
             return nil
         }
 
@@ -409,10 +446,7 @@ func sendDiscordMessage(content: String) async -> String? {
 
             print("❌ Discord HTTP \(httpResponse.statusCode)")
 
-            if let responseText = String(
-                data: data,
-                encoding: .utf8
-            ) {
+            if let responseText = String(data: data, encoding: .utf8) {
                 print("Discord Antwort: \(responseText)")
             }
 
@@ -424,18 +458,11 @@ func sendDiscordMessage(content: String) async -> String? {
                 with: data,
                 options: []
             ) as? [String: Any],
-
             let messageID = json["id"] as? String
-
         else {
-
             print("❌ Discord Message-ID konnte nicht gelesen werden.")
             return nil
         }
-
-        print("")
-        print("✅ DISCORD GESENDET (Message \(messageID))")
-        print("")
 
         return messageID
 
@@ -461,27 +488,23 @@ func updateDiscordMessage(
 
     let payload: [String: Any] = [
         "content": content,
-        "allowed_mentions": [
-            "parse": []
-        ]
+        "allowed_mentions": ["parse": []]
     ]
 
     guard let body = try? JSONSerialization.data(
         withJSONObject: payload,
         options: []
     ) else {
-
         print("❌ Countdown JSON Fehler.")
         return false
     }
 
     guard let messageURL = URL(
         string:
-            webhookURL.absoluteString +
-            "/messages/" +
-            messageID
+            webhookURL.absoluteString
+            + "/messages/"
+            + messageID
     ) else {
-
         print("❌ Discord Message-URL ungültig.")
         return false
     }
@@ -505,18 +528,12 @@ func updateDiscordMessage(
 
         guard let httpResponse = response as? HTTPURLResponse
         else {
-
             print("❌ Ungültige Discord Countdown-Antwort.")
             return false
         }
 
         if httpResponse.statusCode == 429 {
-
-            applyRateLimit(
-                data: data,
-                fallbackSeconds: 2
-            )
-
+            applyRateLimit(data: data, fallbackSeconds: 2)
             return false
         }
 
@@ -526,10 +543,7 @@ func updateDiscordMessage(
 
         print("❌ Discord Countdown HTTP \(httpResponse.statusCode)")
 
-        if let responseText = String(
-            data: data,
-            encoding: .utf8
-        ) {
+        if let responseText = String(data: data, encoding: .utf8) {
             print("Discord Antwort: \(responseText)")
         }
 
@@ -554,27 +568,20 @@ func findRobloxWindow() async throws -> SCWindow? {
             onScreenWindowsOnly: true
         )
 
-    // ============================================================
-    // 1. PRIORITÄT: NORMALE HAUPT-ROBLOX-INSTANZ
-    // ============================================================
-
+    // 1. Priorität: normale Haupt-Roblox-Instanz.
     if let mainRoblox = content.windows.first(where: { window in
 
         let bundleID =
             window.owningApplication?.bundleIdentifier ?? ""
 
-        return bundleID == "com.roblox.RobloxPlayer" &&
-               window.frame.width > 1000 &&
-               window.frame.height > 700
+        return bundleID == "com.roblox.RobloxPlayer"
+            && window.frame.width > 1000
+            && window.frame.height > 700
     }) {
-
         return mainRoblox
     }
 
-    // ============================================================
-    // 2. FALLBACK: GRÖSSTES ROBLOX-FENSTER
-    // ============================================================
-
+    // 2. Fallback: größtes Roblox-Fenster.
     let robloxWindows = content.windows.filter { window in
 
         let appName =
@@ -584,12 +591,12 @@ func findRobloxWindow() async throws -> SCWindow? {
             window.owningApplication?.bundleIdentifier ?? ""
 
         let isRoblox =
-            appName.localizedCaseInsensitiveContains("Roblox") ||
-            bundleID.localizedCaseInsensitiveContains("roblox")
+            appName.localizedCaseInsensitiveContains("Roblox")
+            || bundleID.localizedCaseInsensitiveContains("roblox")
 
         let validSize =
-            window.frame.width > 500 &&
-            window.frame.height > 300
+            window.frame.width > 500
+            && window.frame.height > 300
 
         return isRoblox && validSize
     }
@@ -599,8 +606,8 @@ func findRobloxWindow() async throws -> SCWindow? {
     }
 
     return robloxWindows.max {
-        ($0.frame.width * $0.frame.height) <
-        ($1.frame.width * $1.frame.height)
+        ($0.frame.width * $0.frame.height)
+            < ($1.frame.width * $1.frame.height)
     }
 }
 
@@ -608,7 +615,7 @@ func findRobloxWindow() async throws -> SCWindow? {
 // SCREENSHOT
 // ============================================================
 
-func captureHUD(_ window: SCWindow) async throws -> CGImage {
+func captureWindow(_ window: SCWindow) async throws -> CGImage {
 
     let filter = SCContentFilter(
         desktopIndependentWindow: window
@@ -623,27 +630,29 @@ func captureHUD(_ window: SCWindow) async throws -> CGImage {
     configuration.showsCursor = false
     configuration.pixelFormat = kCVPixelFormatType_32BGRA
 
-    let fullImage = try await SCScreenshotManager.captureImage(
+    return try await SCScreenshotManager.captureImage(
         contentFilter: filter,
         configuration: configuration
     )
+}
 
-    // ============================================================
-    // HUD UNTEN RECHTS AUSSCHNEIDEN
-    // ============================================================
-    //
-    // Das HUD hängt seit dem Update unten rechts und zeigt drei
-    // Zeilen: oben das wechselnde Event mit Namen, darunter
-    // Junkyard (Spitzhacke) und ganz unten Blitz.
+// Eine Zeile aus dem Vollbild schneiden und für OCR vergrößern.
+// Beide Zeilen kommen aus demselben Screenshot - ein Capture pro
+// Durchlauf reicht.
+func cropRow(
+    _ fullImage: CGImage,
+    yFraction: CGFloat,
+    heightFraction: CGFloat
+) throws -> CGImage {
 
     let width = CGFloat(fullImage.width)
     let height = CGFloat(fullImage.height)
 
     let cropRect = CGRect(
         x: width * cropXFraction,
-        y: height * cropYFraction,
+        y: height * yFraction,
         width: width * cropWidthFraction,
-        height: height * cropHeightFraction
+        height: height * heightFraction
     ).integral
 
     guard let croppedImage = fullImage.cropping(to: cropRect)
@@ -653,17 +662,13 @@ func captureHUD(_ window: SCWindow) async throws -> CGImage {
             code: 1,
             userInfo: [
                 NSLocalizedDescriptionKey:
-                    "HUD-Bereich konnte nicht zugeschnitten werden."
+                    "Zeile konnte nicht zugeschnitten werden."
             ]
         )
     }
 
-    // ============================================================
-    // OCR-BILD VERGRÖSSERN
-    // ============================================================
-
-    let enlargedWidth = croppedImage.width * 3
-    let enlargedHeight = croppedImage.height * 3
+    let enlargedWidth = croppedImage.width * ocrUpscale
+    let enlargedHeight = croppedImage.height * ocrUpscale
 
     let colorSpace = CGColorSpaceCreateDeviceRGB()
 
@@ -706,16 +711,15 @@ func saveDebugScreenshot(_ image: CGImage) {
         using: .png,
         properties: [:]
     ) else {
-
         print("❌ PNG konnte nicht erstellt werden.")
         return
     }
 
-    let url = URL(fileURLWithPath: debugScreenshotPath)
-
     do {
-        try pngData.write(to: url)
-        print("📸 Debug-Screenshot: \(url.path)")
+        try pngData.write(
+            to: URL(fileURLWithPath: debugScreenshotPath)
+        )
+        print("📸 Debug-Screenshot: \(debugScreenshotPath)")
     } catch {
         print("❌ Screenshot konnte nicht gespeichert werden: \(error)")
     }
@@ -725,14 +729,17 @@ func saveDebugScreenshot(_ image: CGImage) {
 // OCR
 // ============================================================
 
-// Eine erkannte Textzeile samt vertikaler Position.
-// midY ist normalisiert, 1.0 = oben.
+// Vision liefert mehrere Lesarten pro Zeile. Die beste ist oft
+// verstümmelt, während die zweite oder dritte den Namen trifft.
 struct OCRLine {
     let text: String
-    let midY: CGFloat
+    let alternatives: [String]
 }
 
-func recognizeLines(from image: CGImage) throws -> [OCRLine] {
+func recognizeLines(
+    from image: CGImage,
+    languageCorrection: Bool = false
+) throws -> [OCRLine] {
 
     var lines: [OCRLine] = []
 
@@ -751,23 +758,31 @@ func recognizeLines(from image: CGImage) throws -> [OCRLine] {
 
         for observation in observations {
 
-            guard let candidate =
-                observation.topCandidates(1).first
-            else {
+            let candidates = observation.topCandidates(3)
+
+            guard let best = candidates.first else {
                 continue
             }
 
             lines.append(
                 OCRLine(
-                    text: candidate.string,
-                    midY: observation.boundingBox.midY
+                    text: best.string,
+                    alternatives: candidates.map { $0.string }
                 )
             )
         }
     }
 
     request.recognitionLevel = .accurate
-    request.usesLanguageCorrection = false
+    request.usesLanguageCorrection = languageCorrection
+    request.recognitionLanguages = ["en-US", "de-DE"]
+
+    // Die HUD-Schrift ist klein; Standard wäre 1/32 der Bildhöhe.
+    request.minimumTextHeight = 0.02
+
+    if languageCorrection {
+        request.customWords = eventSpellings.map { $0.spelling }
+    }
 
     let handler = VNImageRequestHandler(
         cgImage: image,
@@ -777,8 +792,7 @@ func recognizeLines(from image: CGImage) throws -> [OCRLine] {
 
     try handler.perform([request])
 
-    // Von oben nach unten sortieren.
-    return lines.sorted { $0.midY > $1.midY }
+    return lines
 }
 
 // ============================================================
@@ -830,8 +844,9 @@ func levenshteinDistance(_ a: String, _ b: String) -> Int {
 
 // Kurze Namen vertragen keine Toleranz: "OG" hat zu fast jedem
 // Zweibuchstaber Distanz 2.
-func allowedDistance(for event: String) -> Int {
-    switch event.count {
+func allowedDistance(for spelling: String) -> Int {
+
+    switch spelling.count {
     case 0...3: return 0
     case 4...6: return 1
     default:    return 2
@@ -842,8 +857,8 @@ func detectEvent(in line: String) -> String? {
 
     let upper = line.uppercased()
 
-    for event in knownEvents where upper.contains(event) {
-        return event
+    for entry in eventSpellings where upper.contains(entry.spelling) {
+        return entry.canonical
     }
 
     let words = upper
@@ -853,13 +868,22 @@ func detectEvent(in line: String) -> String? {
         .filter { !$0.isEmpty }
 
     for word in words {
-        for event in knownEvents {
+        for entry in eventSpellings
+            where levenshteinDistance(word, entry.spelling)
+                <= allowedDistance(for: entry.spelling) {
 
-            if levenshteinDistance(word, event)
-                <= allowedDistance(for: event) {
+            return entry.canonical
+        }
+    }
 
-                return event
-            }
+    return nil
+}
+
+func detectEvent(in line: OCRLine) -> String? {
+
+    for candidate in line.alternatives {
+        if let event = detectEvent(in: candidate) {
+            return event
         }
     }
 
@@ -867,12 +891,14 @@ func detectEvent(in line: String) -> String? {
 }
 
 // ============================================================
-// TIMER EXTRACTION
+// TIMER
 // ============================================================
 
-// Das HUD mischt zwei Schreibweisen: "in 0:14" beim oberen Slot
-// und "in 15m 14s" bei den beiden unteren.
-func parseDuration(from line: String) -> Int? {
+// Die Event-Zeile zählt immer als "in 1:36". Junkyard und Blitz
+// benutzen "in 51m 36s" - deshalb wird nur das Uhrzeit-Format
+// akzeptiert. Rutscht ein Stück der Zeile darunter in den Crop,
+// fällt es damit von selbst raus.
+func parseClockTimer(from line: String) -> Int? {
 
     let cleaned = line
         .uppercased()
@@ -880,64 +906,19 @@ func parseDuration(from line: String) -> Int? {
         .replacingOccurrences(of: "I", with: "1")
         .replacingOccurrences(of: "L", with: "1")
         .replacingOccurrences(of: ";", with: ":")
-        .replacingOccurrences(of: "．", with: ".")
 
-    // ---- Form 1: 1H 05M 14S / 15M 14S / 45S ----
-
-    let unitPattern = #"(\d{1,2})\s*([HMS])"#
-
-    if let regex = try? NSRegularExpression(pattern: unitPattern) {
-
-        let range = NSRange(
-            cleaned.startIndex..<cleaned.endIndex,
-            in: cleaned
-        )
-
-        let matches = regex.matches(in: cleaned, range: range)
-
-        if !matches.isEmpty {
-
-            var total = 0
-            var found = false
-
-            for match in matches {
-
-                guard
-                    let valueRange = Range(
-                        match.range(at: 1),
-                        in: cleaned
-                    ),
-                    let unitRange = Range(
-                        match.range(at: 2),
-                        in: cleaned
-                    ),
-                    let value = Int(cleaned[valueRange])
-                else {
-                    continue
-                }
-
-                switch cleaned[unitRange] {
-                case "H": total += value * 3600
-                case "M": total += value * 60
-                default:  total += value
-                }
-
-                found = true
-            }
-
-            if found {
-                return total
-            }
-        }
+    // Ein "m" oder "s" hinter einer Zahl heißt: andere Zeile.
+    if cleaned.range(
+        of: #"\d\s*[MS]"#,
+        options: .regularExpression
+    ) != nil {
+        return nil
     }
 
-    // ---- Form 2: 0:14 / 12:34 / 1:02:03 ----
-
-    let clockPattern =
-        #"(?<!\d)(?:(\d{1,2}):)?(\d{1,2}):(\d{2})(?!\d)"#
+    let pattern = #"(?<!\d)(\d{1,2}):(\d{2})(?!\d)"#
 
     guard
-        let regex = try? NSRegularExpression(pattern: clockPattern)
+        let regex = try? NSRegularExpression(pattern: pattern)
     else {
         return nil
     }
@@ -952,110 +933,56 @@ func parseDuration(from line: String) -> Int? {
         return nil
     }
 
-    func group(_ index: Int) -> Int? {
-
-        guard let groupRange = Range(
-            match.range(at: index),
-            in: cleaned
-        ) else {
-            return nil
-        }
-
-        return Int(cleaned[groupRange])
-    }
-
     guard
-        let middle = group(2),
-        let last = group(3),
-        last < 60
+        let minuteRange = Range(match.range(at: 1), in: cleaned),
+        let secondRange = Range(match.range(at: 2), in: cleaned),
+        let minutes = Int(cleaned[minuteRange]),
+        let seconds = Int(cleaned[secondRange]),
+        seconds < 60
     else {
         return nil
     }
 
-    if let hours = group(1) {
-
-        guard middle < 60 else {
-            return nil
-        }
-
-        return hours * 3600 + middle * 60 + last
-    }
-
-    return middle * 60 + last
+    return minutes * 60 + seconds
 }
 
 // ============================================================
-// HUD PARSING
+// ZEITPLAN
 // ============================================================
 
-// Zeilen von oben nach unten:
-//
-//   ROADWAY          <- Name, nur beim oberen Slot
-//   in 0:14          <- oberer Slot
-//   in 15m 14s       <- Junkyard
-//   in 45m 14s       <- Blitz
-//
-// Die Zuordnung läuft über die y-Position aus Vision, nicht über
-// die Reihenfolge im OCR-Ergebnis.
-func parseHUD(lines: [OCRLine]) -> HUDReading {
+// Sekunden bis zur nächsten vollen Minute X der Stunde.
+// Steht die Uhr genau darauf, ist der Spawn gerade durch und der
+// nächste kommt in einer Stunde.
+func secondsUntil(minute targetMinute: Int) -> Int {
 
-    var reading = HUDReading()
+    let parts = Calendar.current.dateComponents(
+        [.minute, .second],
+        from: Date()
+    )
 
-    var timers: [(seconds: Int, midY: CGFloat)] = []
-    var labels: [(event: String, midY: CGFloat)] = []
+    let elapsed = (parts.minute ?? 0) * 60 + (parts.second ?? 0)
+    let target = targetMinute * 60
 
-    for line in lines {
+    let delta = target - elapsed
 
-        // Vision trennt Name und Timer meist in zwei Zeilen, fasst sie
-        // aber gelegentlich zu einer zusammen - deshalb beides prüfen.
-        if let event = detectEvent(in: line.text) {
-            labels.append((event, line.midY))
-        }
-
-        if let seconds = parseDuration(from: line.text) {
-            timers.append((seconds, line.midY))
-        }
-    }
-
-    guard !timers.isEmpty else {
-        return reading
-    }
-
-    // Oberster Name gehört zum oberen Slot.
-    let topLabel = labels.first
-
-    reading.rotatingEvent = topLabel?.event
-
-    // Timer unterhalb des Namens zuerst, sonst einfach von oben.
-    var ordered = timers
-
-    if let topLabel {
-        // <= statt <, damit ein Timer auf Höhe des Namens
-        // (zusammengefasste Zeile) nicht verloren geht.
-        let below = timers.filter { $0.midY <= topLabel.midY }
-
-        if !below.isEmpty {
-            ordered = below
-        }
-    }
-
-    let slotOrder: [Slot] = [.rotating, .junkyard, .blitz]
-
-    for (index, timer) in ordered.prefix(slotOrder.count).enumerated() {
-        reading.seconds[slotOrder[index]] = timer.seconds
-    }
-
-    return reading
+    return delta > 0 ? delta : delta + 3600
 }
 
-// ============================================================
-// SCHEDULE FALLBACK
-// ============================================================
+// Beide spawnen jede Stunde zur selben Minute - dafür braucht es
+// keinen Screenshot.
+func junkyardRemaining() -> Int {
+    secondsUntil(minute: junkyardMinute)
+}
 
-// ROADWAY läuft zur vollen, DRAGRACE zur halben Stunde. Wenn OCR
-// den Namen nicht liest, lässt sich das aus der Uhrzeit ableiten,
-// auf die der Countdown zeigt. Die Rarity-Events dazwischen
-// rotieren im 5-Minuten-Takt in unbekannter Reihenfolge und
+func blitzRemaining() -> Int {
+    secondsUntil(minute: blitzMinute)
+}
+
+// ROADWAY startet um :55, DRAGRACE um :25 - jeweils fünf Minuten
+// vor der vollen bzw. halben Stunde. Wenn OCR den Namen nicht
+// liest, lässt sich das aus der Uhrzeit ableiten, auf die der
+// Countdown zeigt. Die Rarity-Events auf den übrigen
+// 5-Minuten-Marken rotieren in unbekannter Reihenfolge und
 // bleiben deshalb offen.
 func scheduledEvent(inSeconds seconds: Int) -> String? {
 
@@ -1064,249 +991,194 @@ func scheduledEvent(inSeconds seconds: Int) -> String? {
     let minute = Calendar.current.component(.minute, from: target)
 
     // Eine Minute Toleranz, der Countdown ist nie exakt synchron.
-    if minute == 0 || minute == 59 {
-        return "ROADWAY"
+    switch minute {
+    case 54, 55: return "ROADWAY"
+    case 24, 25: return "DRAGRACE"
+    default:     return nil
     }
-
-    if minute == 30 || minute == 29 {
-        return "DRAGRACE"
-    }
-
-    return nil
 }
 
 // ============================================================
-// ALERT RULES
+// LESUNG
 // ============================================================
 
-func shouldAlert(slot: Slot, event: String?) -> Bool {
+struct EventReading {
+    var event: String?
+    var seconds: Int?
+}
 
-    switch slot {
+func parseEventRow(lines: [OCRLine]) -> EventReading {
 
-    case .rotating:
-        guard let event else {
-            return false
+    var reading = EventReading()
+
+    for line in lines {
+
+        // Name und Zeit stehen meist in zwei Zeilen, gelegentlich
+        // fasst Vision sie zusammen - deshalb beides prüfen.
+        if reading.event == nil,
+           let event = detectEvent(in: line) {
+            reading.event = event
         }
 
-        return alertEvents.contains(event)
-
-    case .junkyard:
-        return alertJunkyard
-
-    case .blitz:
-        return alertBlitz
+        if reading.seconds == nil,
+           let seconds = parseClockTimer(from: line.text) {
+            reading.seconds = seconds
+        }
     }
-}
 
-func title(for slot: Slot, event: String?) -> String {
-
-    switch slot {
-
-    case .rotating:
-        return event ?? "EVENT"
-
-    case .junkyard:
-        return "JUNKYARD"
-
-    case .blitz:
-        return "BLITZ"
-    }
-}
-
-func headlineEmoji(for slot: Slot, event: String?) -> String {
-
-    switch slot {
-
-    case .rotating:
-        return emoji(for: event ?? "")
-
-    default:
-        return slot.emoji
-    }
+    return reading
 }
 
 // ============================================================
-// COUNTDOWN HANDLING
+// NACHRICHT
 // ============================================================
 
-func handleSlot(
-    _ slot: Slot,
-    reading: HUDReading
+// Letztes Update auf die laufende Nachricht, bevor sie liegen
+// bleibt und die nächste anfängt.
+func finishLiveMessage() async {
+
+    guard let live = state.live, !live.finished else {
+        return
+    }
+
+    _ = await updateDiscordMessage(
+        messageID: live.id,
+        content: discordContent(
+            event: live.event,
+            seconds: 0,
+            junkyardSeconds: junkyardRemaining(),
+            blitzSeconds: blitzRemaining(),
+            mention: false
+        )
+    )
+
+    live.finished = true
+}
+
+func startNewMessage(
+    event: String?,
+    deadline: Date,
+    seconds: Int
 ) async {
 
-    guard let seconds = reading.seconds[slot] else {
-        return
-    }
+    // Die alte Nachricht sauber abschließen.
+    await finishLiveMessage()
 
-    let event = slot == .rotating ? reading.rotatingEvent : nil
-
-    // ----------------------------------------------------
-    // NEUER ZYKLUS
-    // ----------------------------------------------------
-    //
-    // Springt der Timer wieder hoch, hat der Slot neu gestartet.
-
-    if let previous = state.lastSeconds[slot],
-       seconds > previous + 10 {
-
-        if let countdown = state.active[slot] {
-
-            print("🔄 \(slot.label): neuer Zyklus, Countdown beendet.")
-
-            _ = await updateDiscordMessage(
-                messageID: countdown.messageID,
-                content: discordContent(
-                    title: countdown.title,
-                    headlineEmoji: headlineEmoji(
-                        for: slot,
-                        event: state.lastRotatingEvent
-                    ),
-                    seconds: 0,
-                    reading: reading,
-                    mention: false
-                )
-            )
-        }
-
-        state.active[slot] = nil
-    }
-
-    state.lastSeconds[slot] = seconds
-
-    if slot == .rotating, let event {
-        state.lastRotatingEvent = event
-    }
-
-    // ----------------------------------------------------
-    // LAUFENDER COUNTDOWN
-    // ----------------------------------------------------
-
-    if let countdown = state.active[slot] {
-
-        if seconds <= 0 {
-
-            _ = await updateDiscordMessage(
-                messageID: countdown.messageID,
-                content: discordContent(
-                    title: countdown.title,
-                    headlineEmoji: headlineEmoji(for: slot, event: event),
-                    seconds: 0,
-                    reading: reading,
-                    mention: false
-                )
-            )
-
-            print("🎉 \(countdown.title) ist da - Countdown beendet.")
-
-            state.active[slot] = nil
-
-            return
-        }
-
-        guard countdown.lastShownSeconds != seconds else {
-            return
-        }
-
-        // Discord erlaubt nicht beliebig viele Edits pro Sekunde.
-        guard Date().timeIntervalSince(countdown.lastEditAt) >= 1.0
-        else {
-            return
-        }
-
-        let success = await updateDiscordMessage(
-            messageID: countdown.messageID,
-            content: discordContent(
-                title: countdown.title,
-                headlineEmoji: headlineEmoji(for: slot, event: event),
-                seconds: seconds,
-                reading: reading,
-                mention: false
-            )
-        )
-
-        if success {
-            countdown.lastShownSeconds = seconds
-            countdown.lastEditAt = Date()
-
-            print("⏱️ \(countdown.title): \(formatTimer(seconds))")
-        }
-
-        return
-    }
-
-    // ----------------------------------------------------
-    // NEUEN COUNTDOWN STARTEN
-    // ----------------------------------------------------
-
-    guard seconds > 0, seconds <= alertLeadSeconds else {
-        return
-    }
-
-    var resolvedEvent = event
-
-    if slot == .rotating, resolvedEvent == nil {
-        resolvedEvent = scheduledEvent(inSeconds: seconds)
-
-        if let resolvedEvent {
-            print("🗓️ Name aus Zeitplan abgeleitet: \(resolvedEvent)")
-        }
-    }
-
-    guard shouldAlert(slot: slot, event: resolvedEvent) else {
-        return
-    }
-
-    let slotTitle = title(for: slot, event: resolvedEvent)
+    let shouldPing =
+        event.map { alertEvents.contains($0) } ?? alertUnknownEvent
 
     print("")
-    print("🚨 \(slotTitle) in \(formatTimer(seconds)) - Discord!")
+    print(
+        "🚨 \(title(for: event)) in \(formatTimer(seconds))"
+        + (shouldPing ? " - neue Nachricht mit Ping." : " - neue Nachricht.")
+    )
     print("")
 
     guard let messageID = await sendDiscordMessage(
         content: discordContent(
-            title: slotTitle,
-            headlineEmoji: headlineEmoji(for: slot, event: resolvedEvent),
+            event: event,
             seconds: seconds,
-            reading: reading,
-            mention: true
+            junkyardSeconds: junkyardRemaining(),
+            blitzSeconds: blitzRemaining(),
+            mention: shouldPing
         )
     ) else {
         return
     }
 
-    state.active[slot] = Countdown(
-        slot: slot,
-        title: slotTitle,
-        messageID: messageID,
+    state.live = LiveMessage(
+        id: messageID,
+        cycleDeadline: deadline,
+        event: event,
         lastShownSeconds: seconds
     )
 }
 
+// Zieht die laufende Nachricht nach. Braucht weder Screenshot
+// noch OCR, nur die Uhr.
+func tickCountdown() async {
+
+    guard let live = state.live,
+          !live.finished,
+          state.deadline != nil
+    else {
+        return
+    }
+
+    let seconds = state.remaining
+
+    if seconds <= 0 {
+
+        _ = await updateDiscordMessage(
+            messageID: live.id,
+            content: discordContent(
+                event: state.event,
+                seconds: 0,
+                junkyardSeconds: junkyardRemaining(),
+            blitzSeconds: blitzRemaining(),
+                mention: false
+            )
+        )
+
+        print("🎉 \(live.title) ist da.")
+
+        live.finished = true
+
+        return
+    }
+
+    guard live.lastShownSeconds != seconds else {
+        return
+    }
+
+    guard Date().timeIntervalSince(live.lastEditAt) >= editGap
+    else {
+        return
+    }
+
+    let success = await updateDiscordMessage(
+        messageID: live.id,
+        content: discordContent(
+            event: state.event,
+            seconds: seconds,
+            junkyardSeconds: junkyardRemaining(),
+            blitzSeconds: blitzRemaining(),
+            mention: false
+        )
+    )
+
+    if success {
+        live.lastShownSeconds = seconds
+        live.lastEditAt = Date()
+    }
+}
+
 // ============================================================
-// ONE CHECK
+// ONE SYNC
 // ============================================================
 
-func performCheck() async -> HUDReading {
+func performSync() async {
 
     do {
 
         guard let window = try await findRobloxWindow() else {
             print("⚠️ Roblox-Fenster nicht gefunden.")
-            return HUDReading()
+            return
         }
 
-        let screenshot = try await captureHUD(window)
+        let fullImage = try await captureWindow(window)
+
+        let screenshot = try cropRow(
+            fullImage,
+            yFraction: eventRowY,
+            heightFraction: eventRowHeight
+        )
 
         if debugEnabled {
             saveDebugScreenshot(screenshot)
         }
 
         let lines = try recognizeLines(from: screenshot)
-
-        guard !lines.isEmpty else {
-            print("ℹ️ Kein Text erkannt.")
-            return HUDReading()
-        }
 
         if debugEnabled {
             print("📝 OCR:")
@@ -1315,100 +1187,110 @@ func performCheck() async -> HUDReading {
             }
         }
 
-        let reading = parseHUD(lines: lines)
+        var reading = parseEventRow(lines: lines)
 
-        guard !reading.isEmpty else {
-            print("ℹ️ Keine Timer im HUD gefunden.")
-            return reading
+        // Zeit steht, Name nicht: zweiter Versuch mit
+        // Sprachkorrektur und den Namen als customWords.
+        if reading.event == nil, reading.seconds != nil {
+
+            let retry = try recognizeLines(
+                from: screenshot,
+                languageCorrection: true
+            )
+
+            if debugEnabled {
+                print("📝 OCR (2. Versuch):")
+                for line in retry {
+                    print("   \(line.text)")
+                }
+            }
+
+            for line in retry {
+                if let event = detectEvent(in: line) {
+                    reading.event = event
+                    break
+                }
+            }
+        }
+
+        guard let seconds = reading.seconds else {
+            print("ℹ️ Keine Zeit in der Event-Zeile gelesen.")
+            return
+        }
+
+        // Name unlesbar? Um :55 und :25 steht fest, was kommt.
+        if reading.event == nil {
+
+            reading.event = scheduledEvent(inSeconds: seconds)
+
+            if let derived = reading.event {
+                print("🗓️ Name aus Zeitplan abgeleitet: \(derived)")
+            }
+        }
+
+        let deadline = Date().addingTimeInterval(TimeInterval(seconds))
+
+        print(
+            "🎯 \(reading.event ?? "?") \(formatTimer(seconds))"
+        )
+
+        // ----------------------------------------------------
+        // NEUER ZYKLUS?
+        // ----------------------------------------------------
+        //
+        // Nicht am Namen festmachen: dasselbe Event kann zweimal
+        // hintereinander kommen. Maßgeblich ist, ob der
+        // Ablaufzeitpunkt deutlich nach hinten gesprungen ist.
+
+        let isNewCycle: Bool
+
+        if let previous = state.deadline {
+            isNewCycle =
+                deadline.timeIntervalSince(previous)
+                    > newCycleToleranceSeconds
+        } else {
+            // Erster Durchlauf nach dem Start.
+            isNewCycle = true
+        }
+
+        if isNewCycle {
+
+            state.deadline = deadline
+            state.event = reading.event
+
+            await startNewMessage(
+                event: reading.event,
+                deadline: deadline,
+                seconds: seconds
+            )
+
+            return
         }
 
         // ----------------------------------------------------
-        // STATUS
+        // ABGLEICH
         // ----------------------------------------------------
 
-        var status: [String] = []
-
-        if let rotating = reading.seconds[.rotating] {
-
-            let name = reading.rotatingEvent ?? "?"
-
-            status.append("🎯 \(name) \(formatTimer(rotating))")
+        if abs(state.remaining - seconds) > resyncToleranceSeconds {
+            state.deadline = deadline
         }
 
-        if let junkyard = reading.seconds[.junkyard] {
-            status.append("⛏️ \(formatTimer(junkyard))")
+        // Name erst jetzt lesbar geworden.
+        if state.event == nil, let event = reading.event {
+
+            state.event = event
+
+            if let live = state.live, !live.finished {
+                live.event = event
+                live.lastShownSeconds = -1
+
+                print("🔤 Name nachgetragen: \(event)")
+            }
         }
-
-        if let blitz = reading.seconds[.blitz] {
-            status.append("⚡ \(formatTimer(blitz))")
-        }
-
-        print(status.joined(separator: "   |   "))
-
-        // ----------------------------------------------------
-        // SLOTS
-        // ----------------------------------------------------
-
-        for slot in Slot.allCases {
-            await handleSlot(slot, reading: reading)
-        }
-
-        return reading
 
     } catch {
-
-        print("❌ Check fehlgeschlagen: \(error.localizedDescription)")
-
-        return HUDReading()
+        print("❌ Sync fehlgeschlagen: \(error.localizedDescription)")
     }
-}
-
-// ============================================================
-// POLL INTERVAL
-// ============================================================
-
-// Am Takt entscheidet nur, was als Nächstes wirklich gepingt wird.
-func nextInterval(for reading: HUDReading) -> UInt64 {
-
-    if !state.active.isEmpty {
-        return urgentCheckInterval
-    }
-
-    var soonest: Int?
-
-    for slot in Slot.allCases {
-
-        guard let seconds = reading.seconds[slot] else {
-            continue
-        }
-
-        let event = slot == .rotating
-            ? (reading.rotatingEvent
-                ?? scheduledEvent(inSeconds: seconds))
-            : nil
-
-        guard shouldAlert(slot: slot, event: event) else {
-            continue
-        }
-
-        if soonest == nil || seconds < soonest! {
-            soonest = seconds
-        }
-    }
-
-    guard let soonest else {
-        return idleCheckInterval
-    }
-
-    if soonest <= alertLeadSeconds {
-        return urgentCheckInterval
-    }
-
-    if soonest <= alertLeadSeconds + 60 {
-        return activeCheckInterval
-    }
-
-    return idleCheckInterval
 }
 
 // ============================================================
@@ -1420,15 +1302,14 @@ print("==============================================")
 print("       ROBLOX EVENT WATCHER")
 print("==============================================")
 print("")
-print("HUD: unten rechts, 3 Slots")
-print("  🎯 Event    (Name + Countdown)")
-print("  ⛏️ Junkyard")
-print("  ⚡ Blitz")
-print("")
+print("Verfolgt: nur die Event-Zeile oben")
+print("Junkyard: gerechnet, jede Stunde :\(junkyardMinute)")
+print("Blitz: gerechnet, jede Stunde :\(blitzMinute)")
+print("Ping-Rolle: \(pingRoleID.isEmpty ? "kein Ping" : pingRoleID)")
 print("Ping bei: \(alertEvents.sorted().joined(separator: ", "))")
-print("Vorlauf: \(alertLeadSeconds)s")
-print("Junkyard-Ping: \(alertJunkyard ? "an" : "aus")")
-print("Blitz-Ping: \(alertBlitz ? "an" : "aus")")
+print("Unbekannter Name: \(alertUnknownEvent ? "pingt trotzdem" : "kein Ping")")
+print("")
+print("Erste Nachricht beim Start, danach bei jedem Eventwechsel.")
 print("")
 print("Capture: ScreenCaptureKit")
 print("OCR: Apple Vision")
@@ -1447,25 +1328,43 @@ Task {
     print("🚀 Watcher gestartet.")
     print("")
 
-    while !Task.isCancelled {
+    if testEnabled {
 
-        let reading = await performCheck()
+        print("🧪 Teste Discord-Webhook...")
 
-        let interval = nextInterval(for: reading)
-
-        if interval != state.currentInterval {
-
-            state.currentInterval = interval
-
-            print("⏳ Takt: alle \(interval)s")
+        if let messageID = await sendDiscordMessage(
+            content:
+                "🧪 **Roblox Event Watcher** ist verbunden. "
+                + "Das ist eine Testnachricht."
+        ) {
+            print("✅ Webhook funktioniert (Message \(messageID)).")
+        } else {
+            print("❌ Webhook-Test fehlgeschlagen - siehe Fehler oben.")
         }
 
+        print("")
+    }
+
+    while !Task.isCancelled {
+
+        if Date() >= state.nextSync {
+
+            await performSync()
+
+            let interval =
+                state.remaining <= nearEndSeconds
+                    ? syncIntervalNearEnd
+                    : syncInterval
+
+            state.nextSync = Date().addingTimeInterval(interval)
+        }
+
+        await tickCountdown()
+
         do {
-
             try await Task.sleep(
-                nanoseconds: interval * 1_000_000_000
+                nanoseconds: tickSeconds * 1_000_000_000
             )
-
         } catch {
             break
         }
