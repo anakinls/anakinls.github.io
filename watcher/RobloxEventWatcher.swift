@@ -12,21 +12,31 @@ import Dispatch
 // Poll-Intervalle (Sekunden)
 let idleCheckInterval: UInt64 = 25
 let activeCheckInterval: UInt64 = 5
-let urgentCheckInterval: UInt64 = 1
+
+// Solange ein Countdown läuft: jede Sekunde prüfen und höchstens
+// alle zwei Sekunden editieren. Damit hinkt die angezeigte Zahl
+// nie mehr als etwa drei Sekunden hinterher, und die Webhook-Rate
+// bleibt im Rahmen.
+let countdownCheckInterval: UInt64 = 1
+let countdownEditGap: TimeInterval = 2
 
 // Erst ab hier wird gepingt und der Countdown live mitgeschrieben.
 // Der obere Slot wechselt alle 5 Minuten, also deckt ein Vorlauf von
 // 5 Minuten praktisch den ganzen Zyklus ab.
 let alertLeadSeconds = 300
 
-// Unter dieser Restzeit wird sekündlich geprüft und editiert,
-// darüber reicht ein ruhigerer Takt.
-let endgameSeconds = 60
+// Es gibt immer nur EINE Nachricht. Eine neue wird frühestens nach
+// dieser Zeit geschickt - alles dazwischen aktualisiert die
+// bestehende. Nur eine neue Nachricht pingt die Rolle.
+let newMessageMinInterval: TimeInterval = 300
+
+// Rolle, die gepingt wird. Leer lassen = kein Ping.
+let pingRoleID = "1555684515140341903"
 
 // Oberer Slot: "garantierte" Events.
-// ROADWAY  -> jede volle Stunde (:00)
-// DRAGRACE -> jede halbe Stunde (:30)
-// dazwischen alle 5 Minuten eines der Rarity-Events.
+// ROADWAY  -> :55
+// DRAGRACE -> :25
+// auf den übrigen 5-Minuten-Marken ein Rarity-Event.
 let knownEvents = [
     "ROADWAY",
     "DRAGRACE",
@@ -74,7 +84,11 @@ let cropHeightFraction: CGFloat = 0.40
 // wenn der Ausschnitt vorher hochskaliert wird.
 let ocrUpscale = 4
 
-let debugScreenshotPath = "/tmp/roblox-debug.png"
+// Landet auf dem Schreibtisch, damit man es ohne Umweg über den
+// Finder findet und weiterschicken kann.
+let debugScreenshotPath =
+    (NSHomeDirectory() as NSString)
+        .appendingPathComponent("Desktop/roblox-debug.png")
 
 // ============================================================
 // CORE GRAPHICS / APP
@@ -156,29 +170,35 @@ struct HUDReading {
 // STATE
 // ============================================================
 
-final class Countdown {
-    let slot: Slot
-    let title: String
-    let messageID: String
+// Es läuft immer höchstens eine Discord-Nachricht. owner ist der
+// Slot, dessen Countdown sie gerade anzeigt - nil heißt: frei, der
+// nächste Countdown darf sie übernehmen.
+final class LiveMessage {
+    let id: String
+    let createdAt: Date
+
+    var owner: Slot?
+    var title: String
     var lastShownSeconds: Int
     var lastEditAt: Date
 
     init(
-        slot: Slot,
+        id: String,
+        owner: Slot,
         title: String,
-        messageID: String,
         lastShownSeconds: Int
     ) {
-        self.slot = slot
+        self.id = id
+        self.createdAt = Date()
+        self.owner = owner
         self.title = title
-        self.messageID = messageID
         self.lastShownSeconds = lastShownSeconds
         self.lastEditAt = Date()
     }
 }
 
 final class WatcherState {
-    var active: [Slot: Countdown] = [:]
+    var live: LiveMessage?
     var lastSeconds: [Slot: Int] = [:]
     var lastRotatingEvent: String?
     var currentInterval: UInt64 = idleCheckInterval
@@ -261,7 +281,9 @@ func discordContent(
 
     var lines: [String] = []
 
-    let prefix = mention ? "@everyone " : ""
+    let prefix = mention && !pingRoleID.isEmpty
+        ? "<@&\(pingRoleID)> "
+        : ""
 
     if seconds <= 0 {
         lines.append(
@@ -357,12 +379,17 @@ func sendDiscordMessage(content: String) async -> String? {
 
     print("📤 Sende Discord-Nachricht...")
 
+    // Nur die konfigurierte Rolle darf benachrichtigt werden,
+    // ausdrücklich nicht @everyone.
+    let allowedMentions: [String: Any] =
+        pingRoleID.isEmpty
+            ? ["parse": []]
+            : ["parse": [], "roles": [pingRoleID]]
+
     let payload: [String: Any] = [
         "username": "Roblox Event Watcher",
         "content": content,
-        "allowed_mentions": [
-            "parse": ["everyone"]
-        ]
+        "allowed_mentions": allowedMentions
     ]
 
     guard let body = try? JSONSerialization.data(
@@ -1246,14 +1273,14 @@ func handleSlot(
     if let previous = state.lastSeconds[slot],
        seconds > previous + 10 {
 
-        if let countdown = state.active[slot] {
+        if let live = state.live, live.owner == slot {
 
-            print("🔄 \(slot.label): neuer Zyklus, Countdown beendet.")
+            print("🔄 \(slot.label): neuer Zyklus.")
 
             _ = await updateDiscordMessage(
-                messageID: countdown.messageID,
+                messageID: live.id,
                 content: discordContent(
-                    title: countdown.title,
+                    title: live.title,
                     headlineEmoji: headlineEmoji(
                         for: slot,
                         event: state.lastRotatingEvent
@@ -1263,9 +1290,9 @@ func handleSlot(
                     mention: false
                 )
             )
-        }
 
-        state.active[slot] = nil
+            live.owner = nil
+        }
 
         if slot == .rotating {
             state.lastScheduleNote = nil
@@ -1282,14 +1309,14 @@ func handleSlot(
     // LAUFENDER COUNTDOWN
     // ----------------------------------------------------
 
-    if let countdown = state.active[slot] {
+    if let live = state.live, live.owner == slot {
 
         if seconds <= 0 {
 
             _ = await updateDiscordMessage(
-                messageID: countdown.messageID,
+                messageID: live.id,
                 content: discordContent(
-                    title: countdown.title,
+                    title: live.title,
                     headlineEmoji: headlineEmoji(for: slot, event: event),
                     seconds: 0,
                     reading: reading,
@@ -1297,32 +1324,26 @@ func handleSlot(
                 )
             )
 
-            print("🎉 \(countdown.title) ist da - Countdown beendet.")
+            print("🎉 \(live.title) ist da.")
 
-            state.active[slot] = nil
+            live.owner = nil
 
             return
         }
 
-        guard countdown.lastShownSeconds != seconds else {
+        guard live.lastShownSeconds != seconds else {
             return
         }
 
-        // Discord erlaubt nicht beliebig viele Edits pro Sekunde.
-        // Weit vorher reicht ein Update alle 10s, erst in der
-        // Schlussphase wird sekündlich geschrieben.
-        let minimumGap: TimeInterval =
-            seconds > endgameSeconds ? 10 : 1
-
-        guard Date().timeIntervalSince(countdown.lastEditAt) >= minimumGap
+        guard Date().timeIntervalSince(live.lastEditAt) >= countdownEditGap
         else {
             return
         }
 
         let success = await updateDiscordMessage(
-            messageID: countdown.messageID,
+            messageID: live.id,
             content: discordContent(
-                title: countdown.title,
+                title: live.title,
                 headlineEmoji: headlineEmoji(for: slot, event: event),
                 seconds: seconds,
                 reading: reading,
@@ -1331,10 +1352,10 @@ func handleSlot(
         )
 
         if success {
-            countdown.lastShownSeconds = seconds
-            countdown.lastEditAt = Date()
+            live.lastShownSeconds = seconds
+            live.lastEditAt = Date()
 
-            print("⏱️ \(countdown.title): \(formatTimer(seconds))")
+            print("⏱️ \(live.title): \(formatTimer(seconds))")
         }
 
         return
@@ -1345,6 +1366,11 @@ func handleSlot(
     // ----------------------------------------------------
 
     guard seconds > 0, seconds <= alertLeadSeconds else {
+        return
+    }
+
+    // Ein anderer Slot schreibt gerade - es gibt nur eine Nachricht.
+    guard state.live?.owner == nil else {
         return
     }
 
@@ -1365,27 +1391,67 @@ func handleSlot(
     }
 
     let slotTitle = title(for: slot, event: resolvedEvent)
+    let slotEmoji = headlineEmoji(for: slot, event: resolvedEvent)
 
-    print("")
-    print("🚨 \(slotTitle) in \(formatTimer(seconds)) - Discord!")
-    print("")
+    let content = discordContent(
+        title: slotTitle,
+        headlineEmoji: slotEmoji,
+        seconds: seconds,
+        reading: reading,
+        mention: true
+    )
 
-    guard let messageID = await sendDiscordMessage(
-        content: discordContent(
-            title: slotTitle,
-            headlineEmoji: headlineEmoji(for: slot, event: resolvedEvent),
-            seconds: seconds,
-            reading: reading,
-            mention: true
+    // ----------------------------------------------------
+    // BESTEHENDE NACHRICHT WEITERVERWENDEN
+    // ----------------------------------------------------
+    //
+    // Ist die letzte Nachricht noch keine fünf Minuten alt, wird
+    // sie übernommen statt eine neue zu schicken. Ein Edit pingt
+    // die Rolle nicht - genau so ist es gewollt.
+
+    if let live = state.live,
+       Date().timeIntervalSince(live.createdAt) < newMessageMinInterval {
+
+        print("")
+        print("♻️ \(slotTitle) in \(formatTimer(seconds)) - bestehende Nachricht.")
+        print("")
+
+        live.owner = slot
+        live.title = slotTitle
+        live.lastShownSeconds = seconds
+        live.lastEditAt = Date()
+
+        _ = await updateDiscordMessage(
+            messageID: live.id,
+            content: discordContent(
+                title: slotTitle,
+                headlineEmoji: slotEmoji,
+                seconds: seconds,
+                reading: reading,
+                mention: false
+            )
         )
-    ) else {
+
         return
     }
 
-    state.active[slot] = Countdown(
-        slot: slot,
+    // ----------------------------------------------------
+    // NEUE NACHRICHT
+    // ----------------------------------------------------
+
+    print("")
+    print("🚨 \(slotTitle) in \(formatTimer(seconds)) - neue Nachricht.")
+    print("")
+
+    guard let messageID = await sendDiscordMessage(content: content)
+    else {
+        return
+    }
+
+    state.live = LiveMessage(
+        id: messageID,
+        owner: slot,
         title: slotTitle,
-        messageID: messageID,
         lastShownSeconds: seconds
     )
 }
@@ -1519,18 +1585,10 @@ func performCheck() async -> HUDReading {
 // Am Takt entscheidet nur, was als Nächstes wirklich gepingt wird.
 func nextInterval(for reading: HUDReading) -> UInt64 {
 
-    if !state.active.isEmpty {
-
-        // Läuft ein Countdown, hängt der Takt an dessen Restzeit.
-        let remaining = state.active.keys
-            .compactMap { reading.seconds[$0] }
-            .min()
-
-        if let remaining, remaining > endgameSeconds {
-            return activeCheckInterval
-        }
-
-        return urgentCheckInterval
+    // Läuft ein Countdown, wird sekündlich geprüft - sonst hinkt
+    // die angezeigte Sekunde hinterher.
+    if state.live?.owner != nil {
+        return countdownCheckInterval
     }
 
     var soonest: Int?
@@ -1559,10 +1617,8 @@ func nextInterval(for reading: HUDReading) -> UInt64 {
         return idleCheckInterval
     }
 
-    if soonest <= endgameSeconds {
-        return urgentCheckInterval
-    }
-
+    // Kurz vor dem Vorlauf schon dichter prüfen, damit der
+    // Countdown nicht mitten im Zyklus startet.
     if soonest <= alertLeadSeconds + 60 {
         return activeCheckInterval
     }
@@ -1586,6 +1642,8 @@ print("  ⚡ Blitz")
 print("")
 print("Ping bei: \(alertEvents.sorted().joined(separator: ", "))")
 print("Vorlauf: \(alertLeadSeconds)s")
+print("Rolle: \(pingRoleID.isEmpty ? "kein Ping" : pingRoleID)")
+print("Neue Nachricht frühestens alle \(Int(newMessageMinInterval))s")
 print("Unbekannter Name: \(alertUnknownRotating ? "pingt trotzdem" : "kein Ping")")
 print("Junkyard-Ping: \(alertJunkyard ? "an" : "aus")")
 print("Blitz-Ping: \(alertBlitz ? "an" : "aus")")

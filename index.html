@@ -158,8 +158,13 @@
       </div>
       <div class="card">
         <span class="emoji">⏱️</span>
-        <h3>Live countdown</h3>
-        <p>One message, edited in place via <code>PATCH</code>, throttled to one edit a second and backing off on HTTP 429.</p>
+        <h3>One message, live</h3>
+        <p>A single message is edited in place every two seconds, so the number on screen is never more than about three seconds stale.</p>
+      </div>
+      <div class="card">
+        <span class="emoji">🔔</span>
+        <h3>Role ping, rate-limited</h3>
+        <p>Pings one configured role &mdash; never <code>@everyone</code> &mdash; and posts a new message at most once every five minutes.</p>
       </div>
       <div class="card">
         <span class="emoji">📐</span>
@@ -195,7 +200,7 @@ swift watcher/RobloxEventWatcher.swift</pre>
     <p class="sub">First run on a new resolution? Start it with debug output and check that all
       three rows land inside the crop:</p>
 <pre>WATCHER_DEBUG=1 WATCHER_TEST=1 swift watcher/RobloxEventWatcher.swift
-open /tmp/roblox-debug.png</pre>
+open ~/Desktop/roblox-debug.png</pre>
 
     <p class="sub"><code>WATCHER_TEST=1</code> posts one message to the webhook at startup, so you
       know the Discord side works before waiting on an event.</p>
@@ -228,6 +233,15 @@ open /tmp/roblox-debug.png</pre>
         correctly. Each slot runs its own countdown independently.</li>
     </ol>
 
+    <h3 style="margin-top:26px">One message, not a feed</h3>
+    <p class="sub">The watcher keeps exactly one Discord message alive. While a countdown runs it
+      polls once a second and edits that message at most every two seconds, which keeps the
+      displayed value within about three seconds of the game while staying under the webhook rate
+      limit (with <code>retry_after</code> honoured on HTTP 429). A <em>new</em> message is only
+      posted when the last one is at least five minutes old &mdash; anything sooner reuses the
+      existing one. Since an edit never re-notifies, that means fewer pings by design: the role is
+      pinged on a new message, not on every event.</p>
+
     <h3 style="margin-top:26px">Reading two timer formats</h3>
     <p class="sub">The top slot counts in <code>M:SS</code> while the lower two use
       <code>15m 14s</code>, so the parser tries unit-suffixed durations first
@@ -259,7 +273,7 @@ open /tmp/roblox-debug.png</pre>
       can&rsquo;t read the label.</p>
 
     <p class="sub">Run with <code>WATCHER_DEBUG=1</code> to print every OCR line and dump the
-      cropped region to <code>/tmp/roblox-debug.png</code> &mdash; that&rsquo;s how you retune the
+      cropped region to <code>~/Desktop/roblox-debug.png</code> &mdash; that&rsquo;s how you retune the
       crop for your own resolution.</p>
   </section>
 
@@ -270,8 +284,11 @@ open /tmp/roblox-debug.png</pre>
       <tr><th>Setting</th><th>Default</th><th>Meaning</th></tr>
       <tr><td><code>alertEvents</code></td><td>SECRET, OG, MYTHIC, LEGENDARY, RAINBOW</td><td>Which top-slot events actually ping</td></tr>
       <tr><td><code>alertLeadSeconds</code></td><td><code>300</code></td><td>How early the ping goes out</td></tr>
-      <tr><td><code>endgameSeconds</code></td><td><code>60</code></td><td>Below this, checks and edits go to once a second</td></tr>
       <tr><td><code>alertUnknownRotating</code></td><td><code>true</code></td><td>Ping even when the label can&rsquo;t be read</td></tr>
+      <tr><td><code>pingRoleID</code></td><td>a role ID</td><td>Role mentioned on a new message; empty = no ping</td></tr>
+      <tr><td><code>newMessageMinInterval</code></td><td><code>300</code></td><td>Seconds before a <em>new</em> message may be posted</td></tr>
+      <tr><td><code>countdownCheckInterval</code></td><td><code>1</code></td><td>Seconds between checks while a countdown runs</td></tr>
+      <tr><td><code>countdownEditGap</code></td><td><code>2</code></td><td>Minimum seconds between edits of that message</td></tr>
       <tr><td><code>alertJunkyard</code> / <code>alertBlitz</code></td><td><code>false</code></td><td>Ping for the two lower slots too</td></tr>
       <tr><td><code>knownEvents</code></td><td>9 names</td><td>Every label the OCR should recognise</td></tr>
       <tr><td><code>idleCheckInterval</code></td><td><code>25</code></td><td>Seconds between checks when nothing is close</td></tr>
