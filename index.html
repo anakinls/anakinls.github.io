@@ -169,7 +169,7 @@
       <div class="card">
         <span class="emoji">🗓️</span>
         <h3>Schedule fallback</h3>
-        <p>If the name can&rsquo;t be read, a countdown landing on <code>:00</code> is Roadway and one on <code>:30</code> is Dragrace.</p>
+        <p>If the name can&rsquo;t be read, a countdown landing on <code>:55</code> is Roadway and one on <code>:25</code> is Dragrace.</p>
       </div>
     </div>
   </section>
@@ -216,11 +216,12 @@ open /tmp/roblox-debug.png</pre>
         <code>com.roblox.RobloxPlayer</code> above 1000&times;700, and otherwise falls back to the
         largest Roblox window.</li>
       <li><strong>Capture &amp; crop.</strong> <code>SCScreenshotManager</code> grabs the window, then
-        the bottom-right HUD is cropped (right 42%, bottom 38%) and upscaled 3&times; with
+        the bottom-right HUD is cropped (right 45%, bottom 40%) and upscaled 4&times; with
         high-quality interpolation so small text survives OCR.</li>
       <li><strong>Recognise.</strong> <code>VNRecognizeTextRequest</code> runs at
         <code>.accurate</code> with language correction off &mdash; it must not "helpfully" turn
-        <code>RAINBOW</code> into a dictionary word. Each line keeps its vertical position.</li>
+        <code>RAINBOW</code> into a dictionary word. Each line keeps its vertical position and its
+        top three candidate readings.</li>
       <li><strong>Assign and decide.</strong> Lines are sorted top-to-bottom and the three timers map
         onto the rotating / Junkyard / Blitz slots. Once all three have been seen, their vertical
         positions are remembered, so a later reading that misses one still assigns the rest
@@ -235,6 +236,15 @@ open /tmp/roblox-debug.png</pre>
       <code>0</code>, <code>I</code>/<code>l</code> for <code>1</code> &mdash; are repaired before
       matching.</p>
 
+    <h3 style="margin-top:26px">Reading the event name</h3>
+    <p class="sub">The orange label is the smallest text on screen and the hardest to read, so it
+      gets three passes. The crop is upscaled 4&times; and <code>minimumTextHeight</code> is lowered
+      so Vision doesn&rsquo;t discard it; every one of Vision&rsquo;s top three candidate readings is
+      fuzzy-matched, not just the best; and if a timer was found but no name, the frame is re-run
+      <em>with</em> language correction and the nine event names supplied as
+      <code>customWords</code>. That second pass is restricted to the top row, so Junkyard and Blitz
+      can&rsquo;t produce a false match.</p>
+
     <h3 style="margin-top:26px">Fuzzy matching, carefully</h3>
     <p class="sub">Levenshtein tolerance scales with name length: 2 edits for long names like
       <code>LEGENDARY</code>, 1 for mid-length ones, and <strong>exact match only</strong> at three
@@ -242,10 +252,11 @@ open /tmp/roblox-debug.png</pre>
       scrap of text.</p>
 
     <h3 style="margin-top:26px">Rotation</h3>
-    <p class="sub">The top slot runs Roadway on the hour and Dragrace on the half hour, with the
-      rarity events rotating every five minutes in between. Only the two fixed points are
-      predictable from the clock, so that inference is used solely as a fallback when OCR can&rsquo;t
-      read the label.</p>
+    <p class="sub">The top slot runs <strong>Roadway at <code>:55</code></strong> and
+      <strong>Dragrace at <code>:25</code></strong> &mdash; each five minutes before the hour and
+      half hour &mdash; with rarity events on the remaining five-minute marks. Only those two fixed
+      points are predictable from the clock, so that inference is used solely as a fallback when OCR
+      can&rsquo;t read the label.</p>
 
     <p class="sub">Run with <code>WATCHER_DEBUG=1</code> to print every OCR line and dump the
       cropped region to <code>/tmp/roblox-debug.png</code> &mdash; that&rsquo;s how you retune the
@@ -266,8 +277,9 @@ open /tmp/roblox-debug.png</pre>
       <tr><td><code>idleCheckInterval</code></td><td><code>25</code></td><td>Seconds between checks when nothing is close</td></tr>
       <tr><td><code>activeCheckInterval</code></td><td><code>5</code></td><td>Seconds between checks as an alert approaches</td></tr>
       <tr><td><code>urgentCheckInterval</code></td><td><code>1</code></td><td>Seconds between checks while a countdown runs</td></tr>
-      <tr><td><code>cropXFraction</code> / <code>cropWidthFraction</code></td><td><code>0.58</code> / <code>0.42</code></td><td>Horizontal crop, as a fraction of window width</td></tr>
-      <tr><td><code>cropYFraction</code> / <code>cropHeightFraction</code></td><td><code>0.62</code> / <code>0.38</code></td><td>Vertical crop, as a fraction of window height</td></tr>
+      <tr><td><code>cropXFraction</code> / <code>cropWidthFraction</code></td><td><code>0.55</code> / <code>0.45</code></td><td>Horizontal crop, as a fraction of window width</td></tr>
+      <tr><td><code>cropYFraction</code> / <code>cropHeightFraction</code></td><td><code>0.60</code> / <code>0.40</code></td><td>Vertical crop, as a fraction of window height</td></tr>
+      <tr><td><code>ocrUpscale</code></td><td><code>4</code></td><td>How much the crop is enlarged before OCR</td></tr>
       <tr><td><code>DISCORD_WEBHOOK_URL</code></td><td>&mdash; (required)</td><td>Webhook, read from the environment</td></tr>
       <tr><td><code>WATCHER_DEBUG</code></td><td>unset</td><td><code>1</code> prints OCR lines and saves the crop</td></tr>
       <tr><td><code>WATCHER_TEST</code></td><td>unset</td><td><code>1</code> sends one test message at startup</td></tr>

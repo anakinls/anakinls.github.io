@@ -61,12 +61,18 @@ let alertBlitz = false
 let alertUnknownRotating = true
 
 // Crop auf das HUD unten rechts, relativ zur Fenstergröße.
+// Lieber etwas großzügig: ein abgeschnittener Event-Name kostet
+// den Ping, ein paar Pixel Hintergrund kosten nichts.
 // Mit WATCHER_DEBUG=1 wird der Ausschnitt als PNG abgelegt,
 // damit sich das auf einer anderen Auflösung nachziehen lässt.
-let cropXFraction: CGFloat = 0.58
-let cropYFraction: CGFloat = 0.62
-let cropWidthFraction: CGFloat = 0.42
-let cropHeightFraction: CGFloat = 0.38
+let cropXFraction: CGFloat = 0.55
+let cropYFraction: CGFloat = 0.60
+let cropWidthFraction: CGFloat = 0.45
+let cropHeightFraction: CGFloat = 0.40
+
+// Die HUD-Schrift ist klein - Vision liest sie deutlich besser,
+// wenn der Ausschnitt vorher hochskaliert wird.
+let ocrUpscale = 4
 
 let debugScreenshotPath = "/tmp/roblox-debug.png"
 
@@ -685,8 +691,8 @@ func captureHUD(_ window: SCWindow) async throws -> CGImage {
     // OCR-BILD VERGRÖSSERN
     // ============================================================
 
-    let enlargedWidth = croppedImage.width * 3
-    let enlargedHeight = croppedImage.height * 3
+    let enlargedWidth = croppedImage.width * ocrUpscale
+    let enlargedHeight = croppedImage.height * ocrUpscale
 
     let colorSpace = CGColorSpaceCreateDeviceRGB()
 
@@ -750,12 +756,21 @@ func saveDebugScreenshot(_ image: CGImage) {
 
 // Eine erkannte Textzeile samt vertikaler Position.
 // midY ist normalisiert, 1.0 = oben.
+// Vision liefert mehrere Lesarten pro Zeile - für den Event-Namen
+// werden alle geprüft, für den Timer reicht die beste.
 struct OCRLine {
     let text: String
+    let alternatives: [String]
     let midY: CGFloat
 }
 
-func recognizeLines(from image: CGImage) throws -> [OCRLine] {
+// languageCorrection aus: Zahlen bleiben Zahlen.
+// languageCorrection an (plus customWords): zweiter Versuch, wenn
+// der Event-Name sonst nicht lesbar ist.
+func recognizeLines(
+    from image: CGImage,
+    languageCorrection: Bool = false
+) throws -> [OCRLine] {
 
     var lines: [OCRLine] = []
 
@@ -774,15 +789,16 @@ func recognizeLines(from image: CGImage) throws -> [OCRLine] {
 
         for observation in observations {
 
-            guard let candidate =
-                observation.topCandidates(1).first
-            else {
+            let candidates = observation.topCandidates(3)
+
+            guard let best = candidates.first else {
                 continue
             }
 
             lines.append(
                 OCRLine(
-                    text: candidate.string,
+                    text: best.string,
+                    alternatives: candidates.map { $0.string },
                     midY: observation.boundingBox.midY
                 )
             )
@@ -790,7 +806,15 @@ func recognizeLines(from image: CGImage) throws -> [OCRLine] {
     }
 
     request.recognitionLevel = .accurate
-    request.usesLanguageCorrection = false
+    request.usesLanguageCorrection = languageCorrection
+    request.recognitionLanguages = ["en-US"]
+
+    // Die HUD-Schrift ist klein; Standard wäre 1/32 der Bildhöhe.
+    request.minimumTextHeight = 0.02
+
+    if languageCorrection {
+        request.customWords = knownEvents
+    }
 
     let handler = VNImageRequestHandler(
         cgImage: image,
@@ -883,6 +907,19 @@ func detectEvent(in line: String) -> String? {
 
                 return event
             }
+        }
+    }
+
+    return nil
+}
+
+// Vision liefert pro Zeile mehrere Lesarten. Die beste ist oft
+// verstümmelt, während die zweite oder dritte den Namen trifft.
+func detectEvent(in line: OCRLine) -> String? {
+
+    for candidate in line.alternatives {
+        if let event = detectEvent(in: candidate) {
+            return event
         }
     }
 
@@ -1031,7 +1068,7 @@ func parseHUD(lines: [OCRLine]) -> HUDReading {
 
         // Vision trennt Name und Timer meist in zwei Zeilen, fasst sie
         // aber gelegentlich zu einer zusammen - deshalb beides prüfen.
-        if let event = detectEvent(in: line.text) {
+        if let event = detectEvent(in: line) {
             labels.append((event, line.midY))
         }
 
@@ -1115,27 +1152,24 @@ func parseHUD(lines: [OCRLine]) -> HUDReading {
 // SCHEDULE FALLBACK
 // ============================================================
 
-// ROADWAY läuft zur vollen, DRAGRACE zur halben Stunde. Wenn OCR
-// den Namen nicht liest, lässt sich das aus der Uhrzeit ableiten,
-// auf die der Countdown zeigt. Die Rarity-Events dazwischen
-// rotieren im 5-Minuten-Takt in unbekannter Reihenfolge und
-// bleiben deshalb offen.
+// ROADWAY startet um :55, DRAGRACE um :25 - jeweils fünf Minuten vor
+// der vollen bzw. halben Stunde. Wenn OCR den Namen nicht liest,
+// lässt sich das aus der Uhrzeit ableiten, auf die der Countdown
+// zeigt. Die Rarity-Events auf den übrigen 5-Minuten-Marken
+// rotieren in unbekannter Reihenfolge und bleiben deshalb offen.
 func scheduledEvent(inSeconds seconds: Int) -> String? {
 
     let target = Date().addingTimeInterval(TimeInterval(seconds))
 
     let minute = Calendar.current.component(.minute, from: target)
 
-    // Eine Minute Toleranz, der Countdown ist nie exakt synchron.
-    if minute == 0 || minute == 59 {
-        return "ROADWAY"
+    // Eine Minute Toleranz nach unten, der Countdown ist nie
+    // exakt synchron.
+    switch minute {
+    case 54, 55: return "ROADWAY"
+    case 24, 25: return "DRAGRACE"
+    default:     return nil
     }
-
-    if minute == 30 || minute == 29 {
-        return "DRAGRACE"
-    }
-
-    return nil
 }
 
 // ============================================================
@@ -1389,7 +1423,48 @@ func performCheck() async -> HUDReading {
             }
         }
 
-        let reading = parseHUD(lines: lines)
+        var reading = parseHUD(lines: lines)
+
+        // ----------------------------------------------------
+        // ZWEITER VERSUCH FÜR DEN NAMEN
+        // ----------------------------------------------------
+        //
+        // Der Timer steht, aber der Name nicht: nochmal mit
+        // Sprachkorrektur und den Event-Namen als customWords.
+        // Für Zahlen wäre das riskant, für ein Wort hilft es.
+
+        if reading.rotatingEvent == nil,
+           reading.seconds[.rotating] != nil {
+
+            let retry = try recognizeLines(
+                from: screenshot,
+                languageCorrection: true
+            )
+
+            if debugEnabled {
+                print("📝 OCR (2. Versuch):")
+                for line in retry {
+                    print("   \(line.text)")
+                }
+            }
+
+            // Der Name steht auf oder über der obersten Timer-Zeile.
+            // Weiter unten liegen nur Junkyard und Blitz, dort wäre
+            // ein Treffer ein Fehlalarm.
+            let floorY = state.slotY[.rotating].map { $0 - 0.02 }
+
+            for line in retry {
+
+                if let floorY, line.midY < floorY {
+                    continue
+                }
+
+                if let event = detectEvent(in: line) {
+                    reading.rotatingEvent = event
+                    break
+                }
+            }
+        }
 
         guard !reading.isEmpty else {
             print("ℹ️ Keine Timer im HUD gefunden.")
