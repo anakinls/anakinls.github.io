@@ -148,8 +148,8 @@
       </div>
       <div class="card">
         <span class="emoji">👑</span>
-        <h3>Nine event names</h3>
-        <p>Roadway, Dragrace, Gold, Diamond, Rainbow, Mythic, Legendary, Secret and OG, each with its own emoji.</p>
+        <h3>Nine events, two languages</h3>
+        <p>Roadway, Dragrace, Gold, Diamond, Rainbow, Mythic, Legendary, Secret and OG &mdash; matched in English <em>and</em> German, since the HUD mixes both.</p>
       </div>
       <div class="card">
         <span class="emoji">⏳</span>
@@ -163,8 +163,8 @@
       </div>
       <div class="card">
         <span class="emoji">🔔</span>
-        <h3>Role ping, rate-limited</h3>
-        <p>Pings one configured role &mdash; never <code>@everyone</code> &mdash; and posts a new message at most once every five minutes.</p>
+        <h3>Role ping per event</h3>
+        <p>Pings one configured role &mdash; never <code>@everyone</code> &mdash; with a fresh message for each new event, so every cycle notifies.</p>
       </div>
       <div class="card">
         <span class="emoji">📐</span>
@@ -241,14 +241,23 @@ open ~/Desktop/roblox-debug.png</pre>
       side effect: a frame Vision fails to read no longer stalls the countdown &mdash; it just keeps
       ticking until the next successful sync.</p>
 
-    <h3 style="margin-top:26px">One message, not a feed</h3>
-    <p class="sub">The watcher keeps exactly one Discord message alive. While a countdown runs it
-      refreshes once a second from the local clock and edits that message at most every two seconds,
-      which keeps the displayed value within about three seconds of the game while staying under the
-      webhook rate limit (with <code>retry_after</code> honoured on HTTP 429). A <em>new</em> message
-      is only posted when the last one is at least five minutes old &mdash; anything sooner reuses the
-      existing one. Since an edit never re-notifies, that means fewer pings by design: the role is
-      pinged on a new message, not on every event.</p>
+    <h3 style="margin-top:26px">One message per event</h3>
+    <p class="sub">Each event cycle gets its own Discord message, because only a new message
+      notifies &mdash; an edit never does. A new event every five minutes therefore means a ping
+      every five minutes. Within a cycle that one message is edited in place, at most every two
+      seconds, which keeps it under the webhook rate limit (with <code>retry_after</code> honoured
+      on HTTP 429). If the same title restarts within <code>duplicateGuardSeconds</code> it reuses
+      the existing message instead of posting a duplicate &mdash; that catches an OCR dropout
+      mid-countdown.</p>
+
+    <h3 style="margin-top:26px">Which row is which</h3>
+    <p class="sub">The two timer formats aren&rsquo;t interchangeable: the top slot always counts as
+      <code>2:21</code>, the lower two always as <code>7m 21s</code>. So the format identifies the
+      row the same way the icon beside it does &mdash; except it&rsquo;s already in the text, with no
+      image classification and nothing to misread. Exactly one <code>M:SS</code> line means that
+      line is the event, wherever it sits and however many rows were read. Junkyard and Blitz then
+      fall out by vertical order, with their learned positions covering the case where only one of
+      them is legible.</p>
 
     <h3 style="margin-top:26px">Reading two timer formats</h3>
     <p class="sub">The top slot counts in <code>M:SS</code> while the lower two use
@@ -268,10 +277,13 @@ open ~/Desktop/roblox-debug.png</pre>
       can&rsquo;t produce a false match.</p>
 
     <h3 style="margin-top:26px">Fuzzy matching, carefully</h3>
-    <p class="sub">Levenshtein tolerance scales with name length: 2 edits for long names like
-      <code>LEGENDARY</code>, 1 for mid-length ones, and <strong>exact match only</strong> at three
-      characters or fewer &mdash; otherwise <code>OG</code> would match almost any two-letter
-      scrap of text.</p>
+    <p class="sub">The game runs in German and translates some names but not others &mdash;
+      <code>Mythisch</code> for Mythic, yet <code>Rainbow</code> unchanged. Every event therefore
+      maps a canonical name to all the spellings that can appear, matched longest-first so
+      <code>GOLDEN</code> wins over <code>GOLD</code>. Levenshtein tolerance scales with length: 2
+      edits for long names, 1 for mid-length, and <strong>exact match only</strong> at three
+      characters or fewer &mdash; otherwise <code>OG</code> would match almost any two-letter scrap
+      of text.</p>
 
     <h3 style="margin-top:26px">Rotation</h3>
     <p class="sub">The top slot runs <strong>Roadway at <code>:55</code></strong> and
@@ -294,13 +306,13 @@ open ~/Desktop/roblox-debug.png</pre>
       <tr><td><code>alertLeadSeconds</code></td><td><code>300</code></td><td>How early the ping goes out</td></tr>
       <tr><td><code>alertUnknownRotating</code></td><td><code>true</code></td><td>Ping even when the label can&rsquo;t be read</td></tr>
       <tr><td><code>pingRoleID</code></td><td>a role ID</td><td>Role mentioned on a new message; empty = no ping</td></tr>
-      <tr><td><code>newMessageMinInterval</code></td><td><code>300</code></td><td>Seconds before a <em>new</em> message may be posted</td></tr>
+      <tr><td><code>duplicateGuardSeconds</code></td><td><code>45</code></td><td>Window in which the same title reuses its message</td></tr>
       <tr><td><code>syncCheckInterval</code></td><td><code>10</code></td><td>Seconds between OCR re-syncs while counting down</td></tr>
       <tr><td><code>tickSeconds</code></td><td><code>1</code></td><td>Main loop tick; how fast the message is refreshed</td></tr>
       <tr><td><code>resyncToleranceSeconds</code></td><td><code>2</code></td><td>Disagreement the local clock is allowed before OCR wins</td></tr>
       <tr><td><code>countdownEditGap</code></td><td><code>2</code></td><td>Minimum seconds between edits of that message</td></tr>
       <tr><td><code>alertJunkyard</code> / <code>alertBlitz</code></td><td><code>false</code></td><td>Ping for the two lower slots too</td></tr>
-      <tr><td><code>knownEvents</code></td><td>9 names</td><td>Every label the OCR should recognise</td></tr>
+      <tr><td><code>eventAliases</code></td><td>9 events</td><td>Canonical name &rarr; every spelling the HUD may show</td></tr>
       <tr><td><code>idleCheckInterval</code></td><td><code>25</code></td><td>Seconds between checks when nothing is close</td></tr>
       <tr><td><code>activeCheckInterval</code></td><td><code>5</code></td><td>Seconds between checks as an alert approaches</td></tr>
       <tr><td><code>urgentCheckInterval</code></td><td><code>1</code></td><td>Seconds between checks while a countdown runs</td></tr>

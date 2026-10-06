@@ -36,10 +36,14 @@ let resyncToleranceSeconds = 2
 // 5 Minuten praktisch den ganzen Zyklus ab.
 let alertLeadSeconds = 300
 
-// Es gibt immer nur EINE Nachricht. Eine neue wird frühestens nach
-// dieser Zeit geschickt - alles dazwischen aktualisiert die
-// bestehende. Nur eine neue Nachricht pingt die Rolle.
-let newMessageMinInterval: TimeInterval = 300
+// Jeder Event-Zyklus bekommt eine eigene Nachricht - nur eine neue
+// Nachricht pingt die Rolle, ein Edit nicht. Alle fünf Minuten ein
+// neues Event heißt also alle fünf Minuten eine neue Nachricht.
+//
+// Nur wenn innerhalb dieser Spanne derselbe Titel noch einmal
+// startet, wird die bestehende Nachricht weiterverwendet. Das
+// fängt OCR-Aussetzer ab, die sonst eine Dublette erzeugen würden.
+let duplicateGuardSeconds: TimeInterval = 45
 
 // Rolle, die gepingt wird. Leer lassen = kein Ping.
 let pingRoleID = "1555684515140341903"
@@ -48,17 +52,41 @@ let pingRoleID = "1555684515140341903"
 // ROADWAY  -> :55
 // DRAGRACE -> :25
 // auf den übrigen 5-Minuten-Marken ein Rarity-Event.
-let knownEvents = [
-    "ROADWAY",
-    "DRAGRACE",
-    "GOLD",
-    "DIAMOND",
-    "RAINBOW",
-    "MYTHIC",
-    "LEGENDARY",
-    "SECRET",
-    "OG"
+//
+// Das Spiel läuft auf Deutsch und übersetzt einen Teil der Namen
+// ("Mythisch"), einen Teil nicht ("Rainbow"). Links steht der
+// kanonische Name für die Konfiguration, rechts alles, was im HUD
+// tatsächlich stehen kann.
+let eventAliases: [String: [String]] = [
+    "ROADWAY":   ["ROADWAY", "FAHRBAHN"],
+    "DRAGRACE":  ["DRAGRACE", "DRAG RACE", "DRAGRENNEN"],
+    "GOLD":      ["GOLD", "GOLDEN", "GOLDEN"],
+    "DIAMOND":   ["DIAMOND", "DIAMANT"],
+    "RAINBOW":   ["RAINBOW", "REGENBOGEN"],
+    "MYTHIC":    ["MYTHIC", "MYTHISCH"],
+    "LEGENDARY": ["LEGENDARY", "LEGENDÄR", "LEGENDAER", "LEGENDAR"],
+    "SECRET":    ["SECRET", "GEHEIM", "GEHEIMNIS"],
+    "OG":        ["OG"]
 ]
+
+let knownEvents = eventAliases.keys.sorted()
+
+// Alle Schreibweisen, längste zuerst: so gewinnt "GOLDEN" vor
+// "GOLD" und "OG" kann nicht in einem längeren Wort zuschlagen.
+// Die feste Reihenfolge macht das Ergebnis außerdem reproduzierbar,
+// anders als beim Iterieren über ein Dictionary.
+let eventSpellings: [(canonical: String, spelling: String)] =
+    eventAliases
+        .flatMap { entry in
+            entry.value.map {
+                (canonical: entry.key, spelling: $0)
+            }
+        }
+        .sorted { lhs, rhs in
+            lhs.spelling.count == rhs.spelling.count
+                ? lhs.spelling < rhs.spelling
+                : lhs.spelling.count > rhs.spelling.count
+        }
 
 // Nur diese Events lösen einen Discord-Ping aus.
 // Alles eintragen = Ping alle 5 Minuten, also bewusst klein halten.
@@ -867,7 +895,7 @@ func recognizeLines(
     request.minimumTextHeight = 0.02
 
     if languageCorrection {
-        request.customWords = knownEvents
+        request.customWords = eventSpellings.map { $0.spelling }
     }
 
     let handler = VNImageRequestHandler(
@@ -943,8 +971,8 @@ func detectEvent(in line: String) -> String? {
 
     let upper = line.uppercased()
 
-    for event in knownEvents where upper.contains(event) {
-        return event
+    for entry in eventSpellings where upper.contains(entry.spelling) {
+        return entry.canonical
     }
 
     let words = upper
@@ -954,13 +982,11 @@ func detectEvent(in line: String) -> String? {
         .filter { !$0.isEmpty }
 
     for word in words {
-        for event in knownEvents {
+        for entry in eventSpellings
+            where levenshteinDistance(word, entry.spelling)
+                <= allowedDistance(for: entry.spelling) {
 
-            if levenshteinDistance(word, event)
-                <= allowedDistance(for: event) {
-
-                return event
-            }
+            return entry.canonical
         }
     }
 
@@ -984,9 +1010,17 @@ func detectEvent(in line: OCRLine) -> String? {
 // TIMER EXTRACTION
 // ============================================================
 
-// Das HUD mischt zwei Schreibweisen: "in 0:14" beim oberen Slot
-// und "in 15m 14s" bei den beiden unteren.
-func parseDuration(from line: String) -> Int? {
+// Das HUD mischt zwei Schreibweisen, und zwar nicht zufällig:
+// der obere Slot zählt immer als "in 2:21", die beiden unteren
+// immer als "in 7m 21s". Welche Schreibweise eine Zeile benutzt,
+// verrät also die Zeile - genau wie es das Symbol daneben tut,
+// nur dass es im Text schon drinsteht.
+enum TimerStyle {
+    case clock   // 2:21
+    case units   // 7m 21s
+}
+
+func parseDuration(from line: String) -> (seconds: Int, style: TimerStyle)? {
 
     let cleaned = line
         .uppercased()
@@ -1040,7 +1074,7 @@ func parseDuration(from line: String) -> Int? {
             }
 
             if found {
-                return total
+                return (total, .units)
             }
         }
     }
@@ -1092,10 +1126,10 @@ func parseDuration(from line: String) -> Int? {
             return nil
         }
 
-        return hours * 3600 + middle * 60 + last
+        return (hours * 3600 + middle * 60 + last, .clock)
     }
 
-    return middle * 60 + last
+    return (middle * 60 + last, .clock)
 }
 
 // ============================================================
@@ -1111,11 +1145,40 @@ func parseDuration(from line: String) -> Int? {
 //
 // Die Zuordnung läuft über die y-Position aus Vision, nicht über
 // die Reihenfolge im OCR-Ergebnis.
+// Nächstgelegene gelernte Zeile zu einer y-Position.
+func learnedSlot(
+    forMidY midY: CGFloat,
+    among candidates: [Slot]
+) -> Slot? {
+
+    var best: (slot: Slot, distance: CGFloat)?
+
+    for slot in candidates {
+
+        guard let knownY = state.slotY[slot] else {
+            continue
+        }
+
+        let distance = abs(knownY - midY)
+
+        if best == nil || distance < best!.distance {
+            best = (slot, distance)
+        }
+    }
+
+    // Zu weit weg heißt: das ist keine der bekannten Zeilen.
+    guard let best, best.distance < 0.08 else {
+        return nil
+    }
+
+    return best.slot
+}
+
 func parseHUD(lines: [OCRLine]) -> HUDReading {
 
     var reading = HUDReading()
 
-    var timers: [(seconds: Int, midY: CGFloat)] = []
+    var timers: [(seconds: Int, style: TimerStyle, midY: CGFloat)] = []
     var labels: [(event: String, midY: CGFloat)] = []
 
     for line in lines {
@@ -1126,8 +1189,8 @@ func parseHUD(lines: [OCRLine]) -> HUDReading {
             labels.append((event, line.midY))
         }
 
-        if let seconds = parseDuration(from: line.text) {
-            timers.append((seconds, line.midY))
+        if let timer = parseDuration(from: line.text) {
+            timers.append((timer.seconds, timer.style, line.midY))
         }
     }
 
@@ -1155,6 +1218,54 @@ func parseHUD(lines: [OCRLine]) -> HUDReading {
 
     let slotOrder: [Slot] = [.rotating, .junkyard, .blitz]
 
+    // ----------------------------------------------------
+    // ZUORDNUNG ÜBER DIE SCHREIBWEISE
+    // ----------------------------------------------------
+    //
+    // Genau eine Zeile im Format M:SS? Dann ist das der obere
+    // Slot - egal, wie viele Zeilen insgesamt gelesen wurden und
+    // egal, an welcher Stelle sie steht.
+
+    let clockTimers = ordered.filter { $0.style == .clock }
+    let unitTimers = ordered.filter { $0.style == .units }
+
+    if clockTimers.count == 1 {
+
+        let rotating = clockTimers[0]
+
+        reading.seconds[.rotating] = rotating.seconds
+        state.slotY[.rotating] = rotating.midY
+
+        if unitTimers.count >= 2 {
+
+            // Beide unteren da: von oben nach unten.
+            for (index, timer) in unitTimers.prefix(2).enumerated() {
+
+                let slot = index == 0 ? Slot.junkyard : Slot.blitz
+
+                reading.seconds[slot] = timer.seconds
+                state.slotY[slot] = timer.midY
+            }
+
+        } else if let timer = unitTimers.first {
+
+            // Nur eine der beiden gelesen - über die gelernte
+            // Position entscheiden, sonst ist es die obere.
+            let slot = learnedSlot(
+                forMidY: timer.midY,
+                among: [.junkyard, .blitz]
+            ) ?? .junkyard
+
+            reading.seconds[slot] = timer.seconds
+        }
+
+        return reading
+    }
+
+    // ----------------------------------------------------
+    // FALLBACK: POSITION
+    // ----------------------------------------------------
+
     if ordered.count >= slotOrder.count {
 
         // Alle Zeilen da: direkt zuordnen und die Positionen merken.
@@ -1170,24 +1281,11 @@ func parseHUD(lines: [OCRLine]) -> HUDReading {
         // gelernten Positionen gehen.
         for timer in ordered {
 
-            var best: (slot: Slot, distance: CGFloat)?
-
-            for slot in slotOrder {
-
-                guard let knownY = state.slotY[slot] else {
-                    continue
-                }
-
-                let distance = abs(knownY - timer.midY)
-
-                if best == nil || distance < best!.distance {
-                    best = (slot, distance)
-                }
-            }
-
-            // Zu weit weg heißt: das ist keine der bekannten Zeilen.
-            if let best, best.distance < 0.08 {
-                reading.seconds[best.slot] = timer.seconds
+            if let slot = learnedSlot(
+                forMidY: timer.midY,
+                among: slotOrder
+            ) {
+                reading.seconds[slot] = timer.seconds
             }
         }
 
@@ -1385,22 +1483,23 @@ func handleSlot(
     )
 
     // ----------------------------------------------------
-    // BESTEHENDE NACHRICHT WEITERVERWENDEN
+    // DUBLETTEN-SCHUTZ
     // ----------------------------------------------------
     //
-    // Ist die letzte Nachricht noch keine fünf Minuten alt, wird
-    // sie übernommen statt eine neue zu schicken. Ein Edit pingt
-    // die Rolle nicht - genau so ist es gewollt.
+    // Derselbe Titel, gerade eben erst geschickt: dann hat OCR
+    // kurz ausgesetzt und der Countdown startet neu. In dem Fall
+    // die bestehende Nachricht weiterverwenden statt zweimal zu
+    // pingen. Jeder echte Eventwechsel bekommt eine neue.
 
     if let live = state.live,
-       Date().timeIntervalSince(live.createdAt) < newMessageMinInterval {
+       live.title == slotTitle,
+       Date().timeIntervalSince(live.createdAt) < duplicateGuardSeconds {
 
         print("")
         print("♻️ \(slotTitle) in \(formatTimer(seconds)) - bestehende Nachricht.")
         print("")
 
         live.owner = slot
-        live.title = slotTitle
         live.lastShownSeconds = seconds
         live.lastEditAt = Date()
 
@@ -1745,7 +1844,7 @@ print("")
 print("Ping bei: \(alertEvents.sorted().joined(separator: ", "))")
 print("Vorlauf: \(alertLeadSeconds)s")
 print("Rolle: \(pingRoleID.isEmpty ? "kein Ping" : pingRoleID)")
-print("Neue Nachricht frühestens alle \(Int(newMessageMinInterval))s")
+print("Neue Nachricht: bei jedem Eventwechsel")
 print("Unbekannter Name: \(alertUnknownRotating ? "pingt trotzdem" : "kein Ping")")
 print("Junkyard-Ping: \(alertJunkyard ? "an" : "aus")")
 print("Blitz-Ping: \(alertBlitz ? "an" : "aus")")
