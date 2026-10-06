@@ -221,7 +221,7 @@ open ~/Desktop/roblox-debug.png</pre>
         <code>com.roblox.RobloxPlayer</code> above 1000&times;700, and otherwise falls back to the
         largest Roblox window.</li>
       <li><strong>Capture &amp; crop.</strong> <code>SCScreenshotManager</code> grabs the window, then
-        the bottom-right HUD is cropped (right 45%, bottom 40%) and upscaled 4&times; with
+        the bottom-right HUD is cropped (the last 16% in each direction) and upscaled 6&times; with
         high-quality interpolation so small text survives OCR.</li>
       <li><strong>Recognise.</strong> <code>VNRecognizeTextRequest</code> runs at
         <code>.accurate</code> with language correction off &mdash; it must not "helpfully" turn
@@ -233,12 +233,20 @@ open ~/Desktop/roblox-debug.png</pre>
         correctly. Each slot runs its own countdown independently.</li>
     </ol>
 
+    <h3 style="margin-top:26px">OCR syncs a clock, it doesn&rsquo;t drive the countdown</h3>
+    <p class="sub">A screenshot every second to show a ticking number would be wasteful and fragile.
+      Instead each reading is converted into a <em>deadline</em>, and the remaining time comes from
+      the system clock after that. OCR only re-syncs, every ten seconds, and a disagreement of one
+      or two seconds is treated as HUD rounding and ignored so the display never jitters. The useful
+      side effect: a frame Vision fails to read no longer stalls the countdown &mdash; it just keeps
+      ticking until the next successful sync.</p>
+
     <h3 style="margin-top:26px">One message, not a feed</h3>
     <p class="sub">The watcher keeps exactly one Discord message alive. While a countdown runs it
-      polls once a second and edits that message at most every two seconds, which keeps the
-      displayed value within about three seconds of the game while staying under the webhook rate
-      limit (with <code>retry_after</code> honoured on HTTP 429). A <em>new</em> message is only
-      posted when the last one is at least five minutes old &mdash; anything sooner reuses the
+      refreshes once a second from the local clock and edits that message at most every two seconds,
+      which keeps the displayed value within about three seconds of the game while staying under the
+      webhook rate limit (with <code>retry_after</code> honoured on HTTP 429). A <em>new</em> message
+      is only posted when the last one is at least five minutes old &mdash; anything sooner reuses the
       existing one. Since an edit never re-notifies, that means fewer pings by design: the role is
       pinged on a new message, not on every event.</p>
 
@@ -252,7 +260,7 @@ open ~/Desktop/roblox-debug.png</pre>
 
     <h3 style="margin-top:26px">Reading the event name</h3>
     <p class="sub">The orange label is the smallest text on screen and the hardest to read, so it
-      gets three passes. The crop is upscaled 4&times; and <code>minimumTextHeight</code> is lowered
+      gets three passes. The crop is upscaled 6&times; and <code>minimumTextHeight</code> is lowered
       so Vision doesn&rsquo;t discard it; every one of Vision&rsquo;s top three candidate readings is
       fuzzy-matched, not just the best; and if a timer was found but no name, the frame is re-run
       <em>with</em> language correction and the nine event names supplied as
@@ -287,16 +295,18 @@ open ~/Desktop/roblox-debug.png</pre>
       <tr><td><code>alertUnknownRotating</code></td><td><code>true</code></td><td>Ping even when the label can&rsquo;t be read</td></tr>
       <tr><td><code>pingRoleID</code></td><td>a role ID</td><td>Role mentioned on a new message; empty = no ping</td></tr>
       <tr><td><code>newMessageMinInterval</code></td><td><code>300</code></td><td>Seconds before a <em>new</em> message may be posted</td></tr>
-      <tr><td><code>countdownCheckInterval</code></td><td><code>1</code></td><td>Seconds between checks while a countdown runs</td></tr>
+      <tr><td><code>syncCheckInterval</code></td><td><code>10</code></td><td>Seconds between OCR re-syncs while counting down</td></tr>
+      <tr><td><code>tickSeconds</code></td><td><code>1</code></td><td>Main loop tick; how fast the message is refreshed</td></tr>
+      <tr><td><code>resyncToleranceSeconds</code></td><td><code>2</code></td><td>Disagreement the local clock is allowed before OCR wins</td></tr>
       <tr><td><code>countdownEditGap</code></td><td><code>2</code></td><td>Minimum seconds between edits of that message</td></tr>
       <tr><td><code>alertJunkyard</code> / <code>alertBlitz</code></td><td><code>false</code></td><td>Ping for the two lower slots too</td></tr>
       <tr><td><code>knownEvents</code></td><td>9 names</td><td>Every label the OCR should recognise</td></tr>
       <tr><td><code>idleCheckInterval</code></td><td><code>25</code></td><td>Seconds between checks when nothing is close</td></tr>
       <tr><td><code>activeCheckInterval</code></td><td><code>5</code></td><td>Seconds between checks as an alert approaches</td></tr>
       <tr><td><code>urgentCheckInterval</code></td><td><code>1</code></td><td>Seconds between checks while a countdown runs</td></tr>
-      <tr><td><code>cropXFraction</code> / <code>cropWidthFraction</code></td><td><code>0.55</code> / <code>0.45</code></td><td>Horizontal crop, as a fraction of window width</td></tr>
-      <tr><td><code>cropYFraction</code> / <code>cropHeightFraction</code></td><td><code>0.60</code> / <code>0.40</code></td><td>Vertical crop, as a fraction of window height</td></tr>
-      <tr><td><code>ocrUpscale</code></td><td><code>4</code></td><td>How much the crop is enlarged before OCR</td></tr>
+      <tr><td><code>cropXFraction</code> / <code>cropWidthFraction</code></td><td><code>0.84</code> / <code>0.16</code></td><td>Horizontal crop, as a fraction of window width</td></tr>
+      <tr><td><code>cropYFraction</code> / <code>cropHeightFraction</code></td><td><code>0.84</code> / <code>0.16</code></td><td>Vertical crop, as a fraction of window height</td></tr>
+      <tr><td><code>ocrUpscale</code></td><td><code>6</code></td><td>How much the crop is enlarged before OCR</td></tr>
       <tr><td><code>DISCORD_WEBHOOK_URL</code></td><td>&mdash; (required)</td><td>Webhook, read from the environment</td></tr>
       <tr><td><code>WATCHER_DEBUG</code></td><td>unset</td><td><code>1</code> prints OCR lines and saves the crop</td></tr>
       <tr><td><code>WATCHER_TEST</code></td><td>unset</td><td><code>1</code> sends one test message at startup</td></tr>

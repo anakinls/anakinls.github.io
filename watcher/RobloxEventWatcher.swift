@@ -9,16 +9,27 @@ import Dispatch
 // CONFIG
 // ============================================================
 
-// Poll-Intervalle (Sekunden)
+// Poll-Intervalle für OCR (Sekunden)
 let idleCheckInterval: UInt64 = 25
 let activeCheckInterval: UInt64 = 5
 
-// Solange ein Countdown läuft: jede Sekunde prüfen und höchstens
-// alle zwei Sekunden editieren. Damit hinkt die angezeigte Zahl
-// nie mehr als etwa drei Sekunden hinterher, und die Webhook-Rate
-// bleibt im Rahmen.
-let countdownCheckInterval: UInt64 = 1
+// Während ein Countdown läuft muss NICHT sekündlich gescreenshottet
+// werden: aus einer Lesung wird ein Ablaufzeitpunkt, ab da zählt die
+// Uhr lokal weiter. OCR dient nur noch dem Abgleich.
+let syncCheckInterval: UInt64 = 10
+
+// Takt der Hauptschleife. Daran hängt, wie schnell die Discord-
+// Nachricht nachgezogen wird - nicht, wie oft OCR läuft.
+let tickSeconds: UInt64 = 1
+
+// Höchstens alle zwei Sekunden editieren. Zusammen mit dem Takt
+// oben hinkt die angezeigte Zahl nie mehr als etwa drei Sekunden
+// hinterher, und die Webhook-Rate bleibt im Rahmen.
 let countdownEditGap: TimeInterval = 2
+
+// Weicht die OCR-Lesung um mehr als das vom lokal gezählten Wert
+// ab, gilt die Lesung - dann hat sich im Spiel etwas verschoben.
+let resyncToleranceSeconds = 2
 
 // Erst ab hier wird gepingt und der Countdown live mitgeschrieben.
 // Der obere Slot wechselt alle 5 Minuten, also deckt ein Vorlauf von
@@ -71,18 +82,19 @@ let alertBlitz = false
 let alertUnknownRotating = true
 
 // Crop auf das HUD unten rechts, relativ zur Fenstergröße.
-// Lieber etwas großzügig: ein abgeschnittener Event-Name kostet
-// den Ping, ein paar Pixel Hintergrund kosten nichts.
+// Gemessen an einem Debug-Screenshot sitzt der Block bei
+// x 0.88-1.00 und y 0.89-0.98 - der Rest des Bildes ist für OCR
+// nur Ablenkung und kostet Auflösung.
 // Mit WATCHER_DEBUG=1 wird der Ausschnitt als PNG abgelegt,
 // damit sich das auf einer anderen Auflösung nachziehen lässt.
-let cropXFraction: CGFloat = 0.55
-let cropYFraction: CGFloat = 0.60
-let cropWidthFraction: CGFloat = 0.45
-let cropHeightFraction: CGFloat = 0.40
+let cropXFraction: CGFloat = 0.84
+let cropYFraction: CGFloat = 0.84
+let cropWidthFraction: CGFloat = 0.16
+let cropHeightFraction: CGFloat = 0.16
 
 // Die HUD-Schrift ist klein - Vision liest sie deutlich besser,
 // wenn der Ausschnitt vorher hochskaliert wird.
-let ocrUpscale = 4
+let ocrUpscale = 6
 
 // Landet auf dem Schreibtisch, damit man es ohne Umweg über den
 // Finder findet und weiterschicken kann.
@@ -170,6 +182,17 @@ struct HUDReading {
 // STATE
 // ============================================================
 
+// Aus einer OCR-Lesung wird ein Ablaufzeitpunkt. Die Restzeit
+// ergibt sich danach aus der Uhr, nicht aus dem nächsten Screenshot.
+struct SlotTiming {
+    let deadline: Date
+    let syncedAt: Date
+
+    var remaining: Int {
+        max(0, Int(deadline.timeIntervalSinceNow.rounded()))
+    }
+}
+
 // Es läuft immer höchstens eine Discord-Nachricht. owner ist der
 // Slot, dessen Countdown sie gerade anzeigt - nil heißt: frei, der
 // nächste Countdown darf sie übernehmen.
@@ -199,6 +222,10 @@ final class LiveMessage {
 
 final class WatcherState {
     var live: LiveMessage?
+
+    // Lokal weiterlaufende Restzeiten, aus OCR nachgezogen.
+    var timing: [Slot: SlotTiming] = [:]
+
     var lastSeconds: [Slot: Int] = [:]
     var lastRotatingEvent: String?
     var currentInterval: UInt64 = idleCheckInterval
@@ -1308,56 +1335,12 @@ func handleSlot(
     // ----------------------------------------------------
     // LAUFENDER COUNTDOWN
     // ----------------------------------------------------
+    //
+    // Das Nachziehen der Nachricht übernimmt tickCountdown() im
+    // Sekundentakt. Hier wird nur noch entschieden, ob ein
+    // Countdown anfängt.
 
-    if let live = state.live, live.owner == slot {
-
-        if seconds <= 0 {
-
-            _ = await updateDiscordMessage(
-                messageID: live.id,
-                content: discordContent(
-                    title: live.title,
-                    headlineEmoji: headlineEmoji(for: slot, event: event),
-                    seconds: 0,
-                    reading: reading,
-                    mention: false
-                )
-            )
-
-            print("🎉 \(live.title) ist da.")
-
-            live.owner = nil
-
-            return
-        }
-
-        guard live.lastShownSeconds != seconds else {
-            return
-        }
-
-        guard Date().timeIntervalSince(live.lastEditAt) >= countdownEditGap
-        else {
-            return
-        }
-
-        let success = await updateDiscordMessage(
-            messageID: live.id,
-            content: discordContent(
-                title: live.title,
-                headlineEmoji: headlineEmoji(for: slot, event: event),
-                seconds: seconds,
-                reading: reading,
-                mention: false
-            )
-        )
-
-        if success {
-            live.lastShownSeconds = seconds
-            live.lastEditAt = Date()
-
-            print("⏱️ \(live.title): \(formatTimer(seconds))")
-        }
-
+    if state.live?.owner == slot {
         return
     }
 
@@ -1457,6 +1440,88 @@ func handleSlot(
 }
 
 // ============================================================
+// LOKALER COUNTDOWN
+// ============================================================
+
+// Zustand aus den lokal laufenden Uhren, ohne neuen Screenshot.
+func currentReading() -> HUDReading {
+
+    var reading = HUDReading()
+
+    reading.rotatingEvent = state.lastRotatingEvent
+
+    for (slot, timing) in state.timing {
+        reading.seconds[slot] = timing.remaining
+    }
+
+    return reading
+}
+
+// Zieht die Discord-Nachricht nach. Läuft im Sekundentakt und
+// braucht dafür weder Screenshot noch OCR.
+func tickCountdown() async {
+
+    guard let live = state.live,
+          let slot = live.owner,
+          let timing = state.timing[slot]
+    else {
+        return
+    }
+
+    let seconds = timing.remaining
+    let reading = currentReading()
+
+    let event = slot == .rotating
+        ? state.lastRotatingEvent
+        : nil
+
+    if seconds <= 0 {
+
+        _ = await updateDiscordMessage(
+            messageID: live.id,
+            content: discordContent(
+                title: live.title,
+                headlineEmoji: headlineEmoji(for: slot, event: event),
+                seconds: 0,
+                reading: reading,
+                mention: false
+            )
+        )
+
+        print("🎉 \(live.title) ist da.")
+
+        live.owner = nil
+
+        return
+    }
+
+    guard live.lastShownSeconds != seconds else {
+        return
+    }
+
+    guard Date().timeIntervalSince(live.lastEditAt) >= countdownEditGap
+    else {
+        return
+    }
+
+    let success = await updateDiscordMessage(
+        messageID: live.id,
+        content: discordContent(
+            title: live.title,
+            headlineEmoji: headlineEmoji(for: slot, event: event),
+            seconds: seconds,
+            reading: reading,
+            mention: false
+        )
+    )
+
+    if success {
+        live.lastShownSeconds = seconds
+        live.lastEditAt = Date()
+    }
+}
+
+// ============================================================
 // ONE CHECK
 // ============================================================
 
@@ -1538,6 +1603,43 @@ func performCheck() async -> HUDReading {
         }
 
         // ----------------------------------------------------
+        // UHREN NACHZIEHEN
+        // ----------------------------------------------------
+        //
+        // Jede Lesung wird zu einem Ablaufzeitpunkt. Weicht sie nur
+        // um ein, zwei Sekunden von der lokal laufenden Uhr ab, ist
+        // das Rundung im HUD - dann bleibt die alte Uhr stehen,
+        // sonst würde die Anzeige hin und her springen.
+
+        for slot in Slot.allCases {
+
+            guard let seconds = reading.seconds[slot] else {
+                continue
+            }
+
+            if let existing = state.timing[slot],
+               abs(existing.remaining - seconds) <= resyncToleranceSeconds {
+                continue
+            }
+
+            state.timing[slot] = SlotTiming(
+                deadline: Date().addingTimeInterval(TimeInterval(seconds)),
+                syncedAt: Date()
+            )
+        }
+
+        // Slots, die das HUD nicht mehr zeigt, nicht ewig
+        // weiterzählen lassen.
+        for slot in Slot.allCases where reading.seconds[slot] == nil {
+
+            if let timing = state.timing[slot],
+               Date().timeIntervalSince(timing.syncedAt) > 120 {
+
+                state.timing[slot] = nil
+            }
+        }
+
+        // ----------------------------------------------------
         // STATUS
         // ----------------------------------------------------
 
@@ -1582,13 +1684,13 @@ func performCheck() async -> HUDReading {
 // POLL INTERVAL
 // ============================================================
 
-// Am Takt entscheidet nur, was als Nächstes wirklich gepingt wird.
+// Nur noch der OCR-Takt. Wie flüssig der Countdown aussieht, hängt
+// davon nicht ab - das macht die lokale Uhr.
 func nextInterval(for reading: HUDReading) -> UInt64 {
 
-    // Läuft ein Countdown, wird sekündlich geprüft - sonst hinkt
-    // die angezeigte Sekunde hinterher.
+    // Läuft ein Countdown, reicht ein Abgleich alle paar Sekunden.
     if state.live?.owner != nil {
-        return countdownCheckInterval
+        return syncCheckInterval
     }
 
     var soonest: Int?
@@ -1682,23 +1784,35 @@ Task {
         print("")
     }
 
+    // Die Schleife läuft im Sekundentakt, OCR aber nur, wenn es
+    // fällig ist. Dazwischen zieht tickCountdown() die Nachricht
+    // allein aus der lokalen Uhr nach.
+    var nextOCR = Date()
+
     while !Task.isCancelled {
 
-        let reading = await performCheck()
+        if Date() >= nextOCR {
 
-        let interval = nextInterval(for: reading)
+            let reading = await performCheck()
 
-        if interval != state.currentInterval {
+            let interval = nextInterval(for: reading)
 
-            state.currentInterval = interval
+            if interval != state.currentInterval {
 
-            print("⏳ Takt: alle \(interval)s")
+                state.currentInterval = interval
+
+                print("⏳ OCR-Takt: alle \(interval)s")
+            }
+
+            nextOCR = Date().addingTimeInterval(TimeInterval(interval))
         }
+
+        await tickCountdown()
 
         do {
 
             try await Task.sleep(
-                nanoseconds: interval * 1_000_000_000
+                nanoseconds: tickSeconds * 1_000_000_000
             )
 
         } catch {
