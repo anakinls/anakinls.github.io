@@ -9,24 +9,20 @@ import Dispatch
 // CONFIG
 // ============================================================
 
-// Verfolgt wird die Event-Zeile oben. Der Weather-Trait (Blitz)
-// wird in der Nachricht mit ausgegeben - er läuft in langem Takt,
-// also reicht es, ihn selten nachzulesen. Junkyard braucht gar
-// kein OCR, der steht fest (siehe junkyardMinute).
-//
-// Gemessen an einem Debug-Screenshot sitzt die Event-Zeile bei
-// y 0.886-0.918 und die Blitz-Zeile bei y 0.952-0.987 des Fensters.
+// Gelesen wird nur die Event-Zeile oben - sie ist die einzige, die
+// sich nicht ausrechnen lässt. Gemessen an einem Debug-Screenshot
+// sitzt sie bei y 0.886-0.918 des Fensters.
 let cropXFraction: CGFloat = 0.88
 let cropWidthFraction: CGFloat = 0.12
 
 let eventRowY: CGFloat = 0.87
 let eventRowHeight: CGFloat = 0.06
 
-let blitzRowY: CGFloat = 0.951
-let blitzRowHeight: CGFloat = 0.042
-
-// Junkyard spawnt jede Stunde um :15 - das ist Rechnen, kein Lesen.
+// Junkyard und Blitz spawnen jede Stunde zur selben Minute, :15 und
+// :45. Das ist Rechnen, kein Lesen - und nichts, was OCR falsch
+// machen könnte.
 let junkyardMinute = 15
+let blitzMinute = 45
 
 // Die HUD-Schrift ist klein - Vision liest sie deutlich besser,
 // wenn der Ausschnitt vorher hochskaliert wird.
@@ -44,10 +40,6 @@ let syncInterval: TimeInterval = 10
 // nächste Event schnell auffällt.
 let syncIntervalNearEnd: TimeInterval = 3
 let nearEndSeconds = 20
-
-// Der Blitz läuft in langem Takt - einmal pro Minute nachlesen
-// reicht völlig, dazwischen zählt auch er lokal weiter.
-let sideRowSyncInterval: TimeInterval = 60
 
 // Höchstens alle fünf Sekunden editieren. Die angezeigte Zahl
 // hinkt damit bis zu fünf Sekunden hinterher, dafür bleibt die
@@ -208,12 +200,7 @@ final class WatcherState {
     var deadline: Date?
     var event: String?
 
-    // Weather-Trait: gleiche Mechanik wie das Event, nur viel
-    // seltener gelesen. Junkyard steht fest und wird gerechnet.
-    var blitzDeadline: Date?
-
     var nextSync = Date()
-    var nextSideRowSync = Date()
 
     // Nach einem 429 vor diesem Zeitpunkt nichts mehr senden.
     var discordBlockedUntil: Date?
@@ -225,15 +212,6 @@ final class WatcherState {
         }
 
         return max(0, Int(deadline.timeIntervalSinceNow.rounded()))
-    }
-
-    var blitzRemaining: Int? {
-
-        guard let blitzDeadline else {
-            return nil
-        }
-
-        return max(0, Int(blitzDeadline.timeIntervalSinceNow.rounded()))
     }
 }
 
@@ -752,12 +730,9 @@ func saveDebugScreenshot(_ image: CGImage) {
 
 // Vision liefert mehrere Lesarten pro Zeile. Die beste ist oft
 // verstümmelt, während die zweite oder dritte den Namen trifft.
-// midY ist normalisiert, 1.0 = oben - damit lassen sich die beiden
-// unteren Crops auseinanderhalten, wo sie aneinanderstoßen.
 struct OCRLine {
     let text: String
     let alternatives: [String]
-    let midY: CGFloat
 }
 
 func recognizeLines(
@@ -791,8 +766,7 @@ func recognizeLines(
             lines.append(
                 OCRLine(
                     text: best.string,
-                    alternatives: candidates.map { $0.string },
-                    midY: observation.boundingBox.midY
+                    alternatives: candidates.map { $0.string }
                 )
             )
         }
@@ -971,109 +945,6 @@ func parseClockTimer(from line: String) -> Int? {
     return minutes * 60 + seconds
 }
 
-// Der Blitz steht als "42m 47s" da - hier ist genau das gewollt,
-// was in der Event-Zeile ausgeschlossen wird.
-func parseUnitsTimer(from line: String) -> Int? {
-
-    let cleaned = line
-        .uppercased()
-        .replacingOccurrences(of: "O", with: "0")
-        .replacingOccurrences(of: "I", with: "1")
-        .replacingOccurrences(of: "L", with: "1")
-
-    let pattern = #"(\d{1,2})\s*([HMS])"#
-
-    guard
-        let regex = try? NSRegularExpression(pattern: pattern)
-    else {
-        return nil
-    }
-
-    let range = NSRange(
-        cleaned.startIndex..<cleaned.endIndex,
-        in: cleaned
-    )
-
-    let matches = regex.matches(in: cleaned, range: range)
-
-    guard !matches.isEmpty else {
-        return nil
-    }
-
-    var total = 0
-    var found = false
-
-    for match in matches {
-
-        guard
-            let valueRange = Range(match.range(at: 1), in: cleaned),
-            let unitRange = Range(match.range(at: 2), in: cleaned),
-            let value = Int(cleaned[valueRange])
-        else {
-            continue
-        }
-
-        switch cleaned[unitRange] {
-        case "H": total += value * 3600
-        case "M": total += value * 60
-        default:  total += value
-        }
-
-        found = true
-    }
-
-    return found ? total : nil
-}
-
-// ============================================================
-// WEATHER-TRAIT
-// ============================================================
-
-// Die Blitz-Zeile steht im "42m 47s"-Format und wird aus demselben
-// Screenshot geschnitten. preferTop entscheidet, welche Zeile zählt,
-// falls ein Streifen der Nachbarzeile in den Crop ragt - beim Blitz
-// die unterste.
-func readUnitsRow(
-    from fullImage: CGImage,
-    yFraction: CGFloat,
-    heightFraction: CGFloat,
-    preferTop: Bool,
-    label: String
-) -> Int? {
-
-    guard
-        let rowImage = try? cropRow(
-            fullImage,
-            yFraction: yFraction,
-            heightFraction: heightFraction
-        ),
-        let lines = try? recognizeLines(from: rowImage)
-    else {
-        return nil
-    }
-
-    if debugEnabled {
-        print("📝 OCR (\(label)):")
-        for line in lines {
-            print("   \(line.text)")
-        }
-    }
-
-    let sorted = lines.sorted {
-        preferTop
-            ? $0.midY > $1.midY
-            : $0.midY < $1.midY
-    }
-
-    for line in sorted {
-        if let seconds = parseUnitsTimer(from: line.text) {
-            return seconds
-        }
-    }
-
-    return nil
-}
-
 // ============================================================
 // ZEITPLAN
 // ============================================================
@@ -1096,10 +967,14 @@ func secondsUntil(minute targetMinute: Int) -> Int {
     return delta > 0 ? delta : delta + 3600
 }
 
-// Junkyard spawnt jede Stunde zur selben Minute - dafür braucht es
+// Beide spawnen jede Stunde zur selben Minute - dafür braucht es
 // keinen Screenshot.
 func junkyardRemaining() -> Int {
     secondsUntil(minute: junkyardMinute)
+}
+
+func blitzRemaining() -> Int {
+    secondsUntil(minute: blitzMinute)
 }
 
 // ROADWAY startet um :55, DRAGRACE um :25 - jeweils fünf Minuten
@@ -1171,7 +1046,7 @@ func finishLiveMessage() async {
             event: live.event,
             seconds: 0,
             junkyardSeconds: junkyardRemaining(),
-            blitzSeconds: state.blitzRemaining,
+            blitzSeconds: blitzRemaining(),
             mention: false
         )
     )
@@ -1203,7 +1078,7 @@ func startNewMessage(
             event: event,
             seconds: seconds,
             junkyardSeconds: junkyardRemaining(),
-            blitzSeconds: state.blitzRemaining,
+            blitzSeconds: blitzRemaining(),
             mention: shouldPing
         )
     ) else {
@@ -1239,7 +1114,7 @@ func tickCountdown() async {
                 event: state.event,
                 seconds: 0,
                 junkyardSeconds: junkyardRemaining(),
-            blitzSeconds: state.blitzRemaining,
+            blitzSeconds: blitzRemaining(),
                 mention: false
             )
         )
@@ -1266,7 +1141,7 @@ func tickCountdown() async {
             event: state.event,
             seconds: seconds,
             junkyardSeconds: junkyardRemaining(),
-            blitzSeconds: state.blitzRemaining,
+            blitzSeconds: blitzRemaining(),
             mention: false
         )
     )
@@ -1300,30 +1175,6 @@ func performSync() async {
 
         if debugEnabled {
             saveDebugScreenshot(screenshot)
-        }
-
-        // ----------------------------------------------------
-        // WEATHER-TRAIT
-        // ----------------------------------------------------
-        //
-        // Läuft über viele Minuten, also selten nachlesen - aus
-        // demselben Screenshot, nur anders zugeschnitten.
-
-        if Date() >= state.nextSideRowSync {
-
-            state.nextSideRowSync =
-                Date().addingTimeInterval(sideRowSyncInterval)
-
-            if let seconds = readUnitsRow(
-                from: fullImage,
-                yFraction: blitzRowY,
-                heightFraction: blitzRowHeight,
-                preferTop: false,
-                label: "Blitz"
-            ) {
-                state.blitzDeadline =
-                    Date().addingTimeInterval(TimeInterval(seconds))
-            }
         }
 
         let lines = try recognizeLines(from: screenshot)
@@ -1452,7 +1303,7 @@ print("==============================================")
 print("")
 print("Verfolgt: nur die Event-Zeile oben")
 print("Junkyard: gerechnet, jede Stunde :\(junkyardMinute)")
-print("Blitz: aus dem HUD, einmal pro Minute")
+print("Blitz: gerechnet, jede Stunde :\(blitzMinute)")
 print("Ping-Rolle: \(pingRoleID.isEmpty ? "kein Ping" : pingRoleID)")
 print("Ping bei: \(alertEvents.sorted().joined(separator: ", "))")
 print("Unbekannter Name: \(alertUnknownEvent ? "pingt trotzdem" : "kein Ping")")

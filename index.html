@@ -143,8 +143,8 @@
     <div class="grid">
       <div class="card">
         <span class="emoji">🎯⛏️⚡</span>
-        <h3>One row tracked</h3>
-        <p>Only the event row drives the countdown. Blitz is cropped from the same screenshot once a minute; Junkyard is pure arithmetic.</p>
+        <h3>One row read</h3>
+        <p>Only the event row is captured at all. Junkyard and Blitz are fixed hourly spawns, so they are arithmetic, not pixels.</p>
       </div>
       <div class="card">
         <span class="emoji">👑</span>
@@ -253,19 +253,19 @@ open ~/Desktop/roblox-debug.png</pre>
       genuine new event deserving its own message &mdash; a name comparison would have swallowed
       it.</p>
 
-    <h3 style="margin-top:26px">Two crops, one screenshot</h3>
+    <h3 style="margin-top:26px">One crop, because only one row is unknown</h3>
     <p class="sub">The event row is the only one tracked: it is what changes, and spending the
       whole frame on it is what makes the small label legible. If a sliver of the Junkyard row
       leaks into that crop the format filter drops it &mdash; that row counts in
       <code>51m 36s</code> while the event row always counts in <code>1:36</code>, and only
       <code>M:SS</code> is accepted there.</p>
-    <p class="sub">Blitz is still reported, so it is cut from the <em>same</em> screenshot at its
-      own coordinates and read once a minute; between reads its own local clock counts it down,
-      exactly as the event does.</p>
-    <p class="sub"><strong>Junkyard is not read at all.</strong> It spawns at the same minute past
-      every hour, so its countdown is arithmetic on the system clock &mdash; no crop, no OCR,
-      nothing to misread. Each line still gets the format the game uses for it: <code>0:47</code>
-      for the event, <code>25m 47s</code> for the other two.</p>
+    <p class="sub"><strong>Junkyard and Blitz are never read.</strong> Both spawn at a fixed minute
+      past every hour &mdash; <code>:15</code> and <code>:45</code> &mdash; so their countdowns are
+      arithmetic on the system clock. No crop, no OCR, nothing to misread, and they stay correct
+      even while the game window is hidden. Each line still gets the format the game uses for it:
+      <code>0:47</code> for the event, <code>25m 47s</code> for the other two.</p>
+    <p class="sub">That leaves exactly one thing on screen worth reading, which is the whole reason
+      the crop can be this tight.</p>
 
     <h3 style="margin-top:26px">Reading the event name</h3>
     <p class="sub">The orange label is the smallest text on screen and the hardest to read, so it
@@ -311,9 +311,7 @@ open ~/Desktop/roblox-debug.png</pre>
       <tr><td><code>editGap</code></td><td><code>5</code></td><td>Minimum seconds between edits; the display lags by up to this</td></tr>
       <tr><td><code>eventAliases</code></td><td>9 events</td><td>Canonical name &rarr; every spelling the HUD may show</td></tr>
       <tr><td><code>cropXFraction</code> / <code>cropWidthFraction</code></td><td><code>0.88</code> / <code>0.12</code></td><td>Horizontal crop, as a fraction of window width</td></tr>
-      <tr><td><code>junkyardMinute</code></td><td><code>15</code></td><td>Minute past the hour Junkyard spawns; no OCR needed</td></tr>
-      <tr><td><code>blitzRowY</code> / <code>blitzRowHeight</code></td><td><code>0.951</code> / <code>0.042</code></td><td>The Blitz row, cropped from the same screenshot</td></tr>
-      <tr><td><code>sideRowSyncInterval</code></td><td><code>60</code></td><td>Seconds between Blitz re-reads</td></tr>
+      <tr><td><code>junkyardMinute</code> / <code>blitzMinute</code></td><td><code>15</code> / <code>45</code></td><td>Minutes past the hour they spawn; neither is read</td></tr>
       <tr><td><code>eventRowY</code> / <code>eventRowHeight</code></td><td><code>0.87</code> / <code>0.06</code></td><td>The event row &mdash; the only row that is tracked</td></tr>
       <tr><td><code>ocrUpscale</code></td><td><code>6</code></td><td>How much the crop is enlarged before OCR</td></tr>
       <tr><td><code>DISCORD_WEBHOOK_URL</code></td><td>&mdash; (required)</td><td>Webhook, read from the environment</td></tr>
