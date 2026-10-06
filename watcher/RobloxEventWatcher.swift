@@ -9,23 +9,27 @@ import Dispatch
 // CONFIG
 // ============================================================
 
-// Verfolgt wird die Event-Zeile oben. Junkyard interessiert nicht,
-// der Weather-Trait (Blitz) ganz unten wird aber in der Nachricht
-// mit ausgegeben - er läuft in langem Takt, also reicht es, ihn
-// selten nachzulesen.
+// Verfolgt wird die Event-Zeile oben. Junkyard und der
+// Weather-Trait (Blitz) werden in der Nachricht mit ausgegeben -
+// beide laufen in langem Takt, also reicht es, sie selten
+// nachzulesen.
 //
-// Gemessen an einem Debug-Screenshot sitzt die Event-Zeile bei
-// y 0.886-0.918 und die Blitz-Zeile bei y 0.952-0.987 des Fensters.
-// Etwas Rand drum herum, damit es bei leicht anderer Fenstergröße
-// noch passt.
+// Gemessen an einem Debug-Screenshot sitzen die Zeilen bei
+// y 0.886-0.918 (Event), 0.922-0.950 (Junkyard) und 0.952-0.987
+// (Blitz) des Fensters. Die beiden unteren Crops stoßen aneinander;
+// deshalb zählt im Junkyard-Crop die oberste Zeile und im
+// Blitz-Crop die unterste.
 let cropXFraction: CGFloat = 0.88
 let cropWidthFraction: CGFloat = 0.12
 
 let eventRowY: CGFloat = 0.87
 let eventRowHeight: CGFloat = 0.06
 
-let blitzRowY: CGFloat = 0.948
-let blitzRowHeight: CGFloat = 0.045
+let junkyardRowY: CGFloat = 0.919
+let junkyardRowHeight: CGFloat = 0.033
+
+let blitzRowY: CGFloat = 0.951
+let blitzRowHeight: CGFloat = 0.042
 
 // Die HUD-Schrift ist klein - Vision liest sie deutlich besser,
 // wenn der Ausschnitt vorher hochskaliert wird.
@@ -44,9 +48,9 @@ let syncInterval: TimeInterval = 10
 let syncIntervalNearEnd: TimeInterval = 3
 let nearEndSeconds = 20
 
-// Der Blitz läuft fast eine Stunde - einmal pro Minute nachlesen
-// reicht völlig, dazwischen zählt auch er lokal weiter.
-let blitzSyncInterval: TimeInterval = 60
+// Junkyard und Blitz laufen über viele Minuten - einmal pro Minute
+// nachlesen reicht völlig, dazwischen zählen auch sie lokal weiter.
+let sideRowSyncInterval: TimeInterval = 60
 
 // Höchstens alle fünf Sekunden editieren. Die angezeigte Zahl
 // hinkt damit bis zu fünf Sekunden hinterher, dafür bleibt die
@@ -207,11 +211,13 @@ final class WatcherState {
     var deadline: Date?
     var event: String?
 
-    // Weather-Trait, gleiche Mechanik, nur viel seltener gelesen.
+    // Junkyard und Weather-Trait: gleiche Mechanik, nur viel
+    // seltener gelesen.
+    var junkyardDeadline: Date?
     var blitzDeadline: Date?
 
     var nextSync = Date()
-    var nextBlitzSync = Date()
+    var nextSideRowSync = Date()
 
     // Nach einem 429 vor diesem Zeitpunkt nichts mehr senden.
     var discordBlockedUntil: Date?
@@ -225,13 +231,21 @@ final class WatcherState {
         return max(0, Int(deadline.timeIntervalSinceNow.rounded()))
     }
 
-    var blitzRemaining: Int? {
+    private func remaining(until date: Date?) -> Int? {
 
-        guard let blitzDeadline else {
+        guard let date else {
             return nil
         }
 
-        return max(0, Int(blitzDeadline.timeIntervalSinceNow.rounded()))
+        return max(0, Int(date.timeIntervalSinceNow.rounded()))
+    }
+
+    var junkyardRemaining: Int? {
+        remaining(until: junkyardDeadline)
+    }
+
+    var blitzRemaining: Int? {
+        remaining(until: blitzDeadline)
     }
 }
 
@@ -298,10 +312,12 @@ func formatUnits(_ totalSeconds: Int) -> String {
 //   @Rolle
 //   🔴 SECRET
 //   ⏳ in 0:47
+//   ⛏️ Junkyard in 25m 47s
 //   ⚡ Blitz in 42m 47s
 func discordContent(
     event: String?,
     seconds: Int,
+    junkyardSeconds: Int?,
     blitzSeconds: Int?,
     mention: Bool
 ) -> String {
@@ -318,6 +334,10 @@ func discordContent(
         lines.append("✅ **jetzt da!**")
     } else {
         lines.append("⏳ **in \(formatTimer(seconds))**")
+    }
+
+    if let junkyardSeconds {
+        lines.append("⛏️ Junkyard **in \(formatUnits(junkyardSeconds))**")
     }
 
     if let blitzSeconds {
@@ -744,9 +764,12 @@ func saveDebugScreenshot(_ image: CGImage) {
 
 // Vision liefert mehrere Lesarten pro Zeile. Die beste ist oft
 // verstümmelt, während die zweite oder dritte den Namen trifft.
+// midY ist normalisiert, 1.0 = oben - damit lassen sich die beiden
+// unteren Crops auseinanderhalten, wo sie aneinanderstoßen.
 struct OCRLine {
     let text: String
     let alternatives: [String]
+    let midY: CGFloat
 }
 
 func recognizeLines(
@@ -780,7 +803,8 @@ func recognizeLines(
             lines.append(
                 OCRLine(
                     text: best.string,
-                    alternatives: candidates.map { $0.string }
+                    alternatives: candidates.map { $0.string },
+                    midY: observation.boundingBox.midY
                 )
             )
         }
@@ -1014,6 +1038,56 @@ func parseUnitsTimer(from line: String) -> Int? {
 }
 
 // ============================================================
+// JUNKYARD / BLITZ
+// ============================================================
+
+// Beide Zeilen stehen im "42m 47s"-Format und werden aus demselben
+// Screenshot geschnitten. Die Crops stoßen aneinander, deshalb
+// entscheidet die Position: im Junkyard-Crop zählt die oberste
+// Zeile, im Blitz-Crop die unterste. Ein hineinragender Streifen
+// der Nachbarzeile wird so nicht verwechselt.
+func readUnitsRow(
+    from fullImage: CGImage,
+    yFraction: CGFloat,
+    heightFraction: CGFloat,
+    preferTop: Bool,
+    label: String
+) -> Int? {
+
+    guard
+        let rowImage = try? cropRow(
+            fullImage,
+            yFraction: yFraction,
+            heightFraction: heightFraction
+        ),
+        let lines = try? recognizeLines(from: rowImage)
+    else {
+        return nil
+    }
+
+    if debugEnabled {
+        print("📝 OCR (\(label)):")
+        for line in lines {
+            print("   \(line.text)")
+        }
+    }
+
+    let sorted = lines.sorted {
+        preferTop
+            ? $0.midY > $1.midY
+            : $0.midY < $1.midY
+    }
+
+    for line in sorted {
+        if let seconds = parseUnitsTimer(from: line.text) {
+            return seconds
+        }
+    }
+
+    return nil
+}
+
+// ============================================================
 // ZEITPLAN
 // ============================================================
 
@@ -1085,6 +1159,7 @@ func finishLiveMessage() async {
         content: discordContent(
             event: live.event,
             seconds: 0,
+            junkyardSeconds: state.junkyardRemaining,
             blitzSeconds: state.blitzRemaining,
             mention: false
         )
@@ -1116,6 +1191,7 @@ func startNewMessage(
         content: discordContent(
             event: event,
             seconds: seconds,
+            junkyardSeconds: state.junkyardRemaining,
             blitzSeconds: state.blitzRemaining,
             mention: shouldPing
         )
@@ -1151,7 +1227,8 @@ func tickCountdown() async {
             content: discordContent(
                 event: state.event,
                 seconds: 0,
-                blitzSeconds: state.blitzRemaining,
+                junkyardSeconds: state.junkyardRemaining,
+            blitzSeconds: state.blitzRemaining,
                 mention: false
             )
         )
@@ -1177,6 +1254,7 @@ func tickCountdown() async {
         content: discordContent(
             event: state.event,
             seconds: seconds,
+            junkyardSeconds: state.junkyardRemaining,
             blitzSeconds: state.blitzRemaining,
             mention: false
         )
@@ -1214,40 +1292,37 @@ func performSync() async {
         }
 
         // ----------------------------------------------------
-        // WEATHER-TRAIT
+        // JUNKYARD UND WEATHER-TRAIT
         // ----------------------------------------------------
         //
-        // Läuft fast eine Stunde, also selten nachlesen - aus
-        // demselben Screenshot, nur anders zugeschnitten.
+        // Beide laufen über viele Minuten, also selten nachlesen -
+        // aus demselben Screenshot, nur anders zugeschnitten.
 
-        if Date() >= state.nextBlitzSync {
+        if Date() >= state.nextSideRowSync {
 
-            state.nextBlitzSync =
-                Date().addingTimeInterval(blitzSyncInterval)
+            state.nextSideRowSync =
+                Date().addingTimeInterval(sideRowSyncInterval)
 
-            if let blitzImage = try? cropRow(
-                fullImage,
+            if let seconds = readUnitsRow(
+                from: fullImage,
+                yFraction: junkyardRowY,
+                heightFraction: junkyardRowHeight,
+                preferTop: true,
+                label: "Junkyard"
+            ) {
+                state.junkyardDeadline =
+                    Date().addingTimeInterval(TimeInterval(seconds))
+            }
+
+            if let seconds = readUnitsRow(
+                from: fullImage,
                 yFraction: blitzRowY,
-                heightFraction: blitzRowHeight
-            ),
-               let blitzLines = try? recognizeLines(from: blitzImage) {
-
-                if debugEnabled {
-                    print("📝 OCR (Blitz):")
-                    for line in blitzLines {
-                        print("   \(line.text)")
-                    }
-                }
-
-                for line in blitzLines {
-                    if let blitzSeconds = parseUnitsTimer(from: line.text) {
-
-                        state.blitzDeadline = Date()
-                            .addingTimeInterval(TimeInterval(blitzSeconds))
-
-                        break
-                    }
-                }
+                heightFraction: blitzRowHeight,
+                preferTop: false,
+                label: "Blitz"
+            ) {
+                state.blitzDeadline =
+                    Date().addingTimeInterval(TimeInterval(seconds))
             }
         }
 
