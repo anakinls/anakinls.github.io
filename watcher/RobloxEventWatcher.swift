@@ -10,13 +10,45 @@ import Dispatch
 // ============================================================
 
 // Gelesen wird nur die Event-Zeile oben - sie ist die einzige, die
-// sich nicht ausrechnen lässt. Gemessen an einem Debug-Screenshot
-// sitzt sie bei y 0.886-0.918 des Fensters.
-let cropXFraction: CGFloat = 0.88
-let cropWidthFraction: CGFloat = 0.12
+// sich nicht ausrechnen lässt.
+//
+// Die Werte passen zu einem vergrößerten HUD: Name und Zeit liegen
+// dann bei y 0.863-0.894, die Junkyard-Zeile beginnt bei 0.903.
+// Der Crop ist bewusst großzügiger als nötig - ein hineinragender
+// Streifen der Zeile darunter stört nicht, weil dort "35m 44s"
+// steht und nur das M:SS-Format akzeptiert wird. Ein abgeschnittener
+// Name kostet dagegen den Namen.
+//
+// Zum Nachjustieren ohne Neubau:
+//   WATCHER_CROP="0.86,0.845,0.14,0.068"   (x, y, Breite, Höhe)
+let cropValues: [CGFloat]? = {
 
-let eventRowY: CGFloat = 0.87
-let eventRowHeight: CGFloat = 0.06
+    guard let raw =
+        ProcessInfo.processInfo.environment["WATCHER_CROP"]
+    else {
+        return nil
+    }
+
+    var values: [CGFloat] = []
+
+    for part in raw.split(separator: ",") {
+
+        let trimmed = part.trimmingCharacters(in: .whitespaces)
+
+        guard let number = Double(trimmed) else {
+            return nil
+        }
+
+        values.append(CGFloat(number))
+    }
+
+    return values.count == 4 ? values : nil
+}()
+
+let cropXFraction: CGFloat = cropValues?[0] ?? 0.86
+let cropYFraction: CGFloat = cropValues?[1] ?? 0.845
+let cropWidthFraction: CGFloat = cropValues?[2] ?? 0.14
+let cropHeightFraction: CGFloat = cropValues?[3] ?? 0.068
 
 // Junkyard und Blitz spawnen jede Stunde zur selben Minute, :15 und
 // :45. Das ist Rechnen, kein Lesen - und nichts, was OCR falsch
@@ -636,23 +668,18 @@ func captureWindow(_ window: SCWindow) async throws -> CGImage {
     )
 }
 
-// Eine Zeile aus dem Vollbild schneiden und für OCR vergrößern.
-// Beide Zeilen kommen aus demselben Screenshot - ein Capture pro
-// Durchlauf reicht.
-func cropRow(
-    _ fullImage: CGImage,
-    yFraction: CGFloat,
-    heightFraction: CGFloat
-) throws -> CGImage {
+// Die Event-Zeile aus dem Vollbild schneiden und für OCR
+// vergrößern.
+func cropEventRow(_ fullImage: CGImage) throws -> CGImage {
 
     let width = CGFloat(fullImage.width)
     let height = CGFloat(fullImage.height)
 
     let cropRect = CGRect(
         x: width * cropXFraction,
-        y: height * yFraction,
+        y: height * cropYFraction,
         width: width * cropWidthFraction,
-        height: height * heightFraction
+        height: height * cropHeightFraction
     ).integral
 
     guard let croppedImage = fullImage.cropping(to: cropRect)
@@ -662,7 +689,7 @@ func cropRow(
             code: 1,
             userInfo: [
                 NSLocalizedDescriptionKey:
-                    "Zeile konnte nicht zugeschnitten werden."
+                    "Event-Zeile konnte nicht zugeschnitten werden."
             ]
         )
     }
@@ -1168,11 +1195,7 @@ func performSync() async {
 
         let fullImage = try await captureWindow(window)
 
-        let screenshot = try cropRow(
-            fullImage,
-            yFraction: eventRowY,
-            heightFraction: eventRowHeight
-        )
+        let screenshot = try cropEventRow(fullImage)
 
         if debugEnabled {
             saveDebugScreenshot(screenshot)
@@ -1317,6 +1340,11 @@ print("OCR: Apple Vision")
 if debugEnabled {
     print("")
     print("🐞 Debug an - OCR-Zeilen und \(debugScreenshotPath)")
+    print(
+        "   Crop: x \(cropXFraction) y \(cropYFraction) "
+        + "b \(cropWidthFraction) h \(cropHeightFraction)"
+        + (cropValues == nil ? "" : "  (aus WATCHER_CROP)")
+    )
 }
 
 print("")

@@ -264,8 +264,12 @@ open ~/Desktop/roblox-debug.png</pre>
       arithmetic on the system clock. No crop, no OCR, nothing to misread, and they stay correct
       even while the game window is hidden. Each line still gets the format the game uses for it:
       <code>0:47</code> for the event, <code>25m 47s</code> for the other two.</p>
-    <p class="sub">That leaves exactly one thing on screen worth reading, which is the whole reason
-      the crop can be this tight.</p>
+    <p class="sub">That leaves exactly one thing on screen worth reading. The crop sits a little
+      wider than that row needs, on purpose: a sliver of the Junkyard row bleeding in is harmless,
+      because it reads <code>35m 44s</code> and only <code>M:SS</code> is accepted &mdash; while a
+      clipped label costs the event name outright. Resizing the HUD in-game moves the row, so
+      <code>WATCHER_CROP="x,y,w,h"</code> re-aims the crop without a rebuild, and
+      <code>WATCHER_DEBUG=1</code> prints the values in use alongside the saved crop.</p>
 
     <h3 style="margin-top:26px">Reading the event name</h3>
     <p class="sub">The orange label is the smallest text on screen and the hardest to read, so it
@@ -310,13 +314,14 @@ open ~/Desktop/roblox-debug.png</pre>
       <tr><td><code>resyncToleranceSeconds</code></td><td><code>2</code></td><td>Disagreement the local clock is allowed before OCR wins</td></tr>
       <tr><td><code>editGap</code></td><td><code>5</code></td><td>Minimum seconds between edits; the display lags by up to this</td></tr>
       <tr><td><code>eventAliases</code></td><td>9 events</td><td>Canonical name &rarr; every spelling the HUD may show</td></tr>
-      <tr><td><code>cropXFraction</code> / <code>cropWidthFraction</code></td><td><code>0.88</code> / <code>0.12</code></td><td>Horizontal crop, as a fraction of window width</td></tr>
+      <tr><td><code>cropXFraction</code> / <code>cropWidthFraction</code></td><td><code>0.86</code> / <code>0.14</code></td><td>Horizontal crop, as a fraction of window width</td></tr>
       <tr><td><code>junkyardMinute</code> / <code>blitzMinute</code></td><td><code>15</code> / <code>45</code></td><td>Minutes past the hour they spawn; neither is read</td></tr>
-      <tr><td><code>eventRowY</code> / <code>eventRowHeight</code></td><td><code>0.87</code> / <code>0.06</code></td><td>The event row &mdash; the only row that is tracked</td></tr>
+      <tr><td><code>cropYFraction</code> / <code>cropHeightFraction</code></td><td><code>0.845</code> / <code>0.068</code></td><td>Vertical crop &mdash; the event row</td></tr>
       <tr><td><code>ocrUpscale</code></td><td><code>6</code></td><td>How much the crop is enlarged before OCR</td></tr>
       <tr><td><code>DISCORD_WEBHOOK_URL</code></td><td>&mdash; (required)</td><td>Webhook, read from the environment</td></tr>
       <tr><td><code>WATCHER_DEBUG</code></td><td>unset</td><td><code>1</code> prints OCR lines and saves the crop</td></tr>
       <tr><td><code>WATCHER_TEST</code></td><td>unset</td><td><code>1</code> sends one test message at startup</td></tr>
+      <tr><td><code>WATCHER_CROP</code></td><td>unset</td><td><code>x,y,w,h</code> overrides the crop without rebuilding</td></tr>
     </table>
 
     <p class="sub" style="margin-top:20px">Every top-slot event pings if you add it to
